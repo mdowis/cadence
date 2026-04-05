@@ -1,0 +1,895 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cadence — Kalshi Arbitrage Dashboard</title>
+<style>
+  :root {
+    --bg: #0a0e17;
+    --surface: #111827;
+    --surface2: #1a2236;
+    --border: #1e2d4a;
+    --text: #e2e8f0;
+    --text-dim: #7a8ba8;
+    --green: #22c55e;
+    --green-dim: #15803d;
+    --red: #ef4444;
+    --yellow: #eab308;
+    --blue: #3b82f6;
+    --purple: #a855f7;
+    --cyan: #06b6d4;
+    --accent: #3b82f6;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ---- Header ---- */
+  .header {
+    background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 1.25rem 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    backdrop-filter: blur(12px);
+  }
+
+  .header-left { display: flex; align-items: center; gap: 1rem; }
+
+  .logo {
+    font-size: 1.5rem;
+    font-weight: 800;
+    background: linear-gradient(135deg, var(--cyan), var(--purple));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    letter-spacing: -0.5px;
+  }
+
+  .mode-badge {
+    font-size: 0.65rem;
+    padding: 0.2rem 0.6rem;
+    border-radius: 9999px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .mode-badge.demo { background: var(--purple); color: #fff; }
+  .mode-badge.live { background: var(--green); color: #000; animation: pulse 2s infinite; }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
+
+  .header-right { display: flex; align-items: center; gap: 1rem; }
+
+  .last-scan {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+  }
+
+  .refresh-btn {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0.4rem 1rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 0.75rem;
+    transition: all 0.2s;
+  }
+  .refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .refresh-btn.spinning { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---- Stats Row ---- */
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1rem;
+    padding: 1.5rem 2rem;
+  }
+
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.3s, transform 0.2s;
+  }
+  .stat-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .stat-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+    border-radius: 10px 10px 0 0;
+  }
+  .stat-card.green::before { background: var(--green); }
+  .stat-card.blue::before { background: var(--blue); }
+  .stat-card.yellow::before { background: var(--yellow); }
+  .stat-card.purple::before { background: var(--purple); }
+  .stat-card.cyan::before { background: var(--cyan); }
+  .stat-card.red::before { background: var(--red); }
+
+  .stat-label { font-size: 0.65rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 0.4rem; }
+  .stat-value { font-size: 1.75rem; font-weight: 800; line-height: 1; }
+  .stat-value.green { color: var(--green); }
+  .stat-value.blue { color: var(--blue); }
+  .stat-value.yellow { color: var(--yellow); }
+  .stat-value.purple { color: var(--purple); }
+  .stat-value.cyan { color: var(--cyan); }
+  .stat-value.red { color: var(--red); }
+
+  /* ---- Main Grid ---- */
+  .main-grid {
+    display: grid;
+    grid-template-columns: 1fr 380px;
+    gap: 1.5rem;
+    padding: 0 2rem 2rem;
+  }
+
+  @media (max-width: 1100px) {
+    .main-grid { grid-template-columns: 1fr; }
+  }
+
+  /* ---- Panel ---- */
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .panel-header {
+    padding: 0.85rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--surface2);
+  }
+
+  .panel-title {
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .panel-body { padding: 1rem 1.25rem; }
+
+  /* ---- Opportunities Table ---- */
+  .opp-filters {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .filter-btn {
+    font-family: inherit;
+    font-size: 0.65rem;
+    padding: 0.3rem 0.7rem;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .filter-btn:hover, .filter-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(59,130,246,0.1); }
+
+  .opp-list { display: flex; flex-direction: column; gap: 0.75rem; }
+
+  .opp-card {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    transition: all 0.3s;
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
+  }
+  .opp-card:hover { border-color: var(--green); transform: translateX(3px); }
+  .opp-card.expanded .opp-details { display: block; }
+
+  .opp-card::after {
+    content: '';
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 3px;
+  }
+  .opp-card.type-binary::after { background: var(--blue); }
+  .opp-card.type-multi-yes::after { background: var(--green); }
+  .opp-card.type-multi-no::after { background: var(--purple); }
+
+  .opp-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+
+  .opp-info { flex: 1; min-width: 0; }
+  .opp-type {
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 0.25rem;
+  }
+  .opp-type.binary { color: var(--blue); }
+  .opp-type.multi-yes { color: var(--green); }
+  .opp-type.multi-no { color: var(--purple); }
+
+  .opp-event {
+    font-size: 0.85rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .opp-ticker { font-size: 0.65rem; color: var(--text-dim); margin-top: 0.15rem; }
+
+  .opp-profit { text-align: right; flex-shrink: 0; }
+  .opp-profit-value {
+    font-size: 1.3rem;
+    font-weight: 800;
+    color: var(--green);
+    line-height: 1;
+  }
+  .opp-profit-label { font-size: 0.6rem; color: var(--text-dim); margin-top: 0.15rem; }
+
+  .opp-bar-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+  }
+
+  .opp-bar-track {
+    flex: 1;
+    height: 6px;
+    background: var(--bg);
+    border-radius: 3px;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .opp-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.6s ease;
+  }
+  .opp-bar-fill.cost { background: var(--red); position: absolute; left: 0; }
+  .opp-bar-fill.fee { background: var(--yellow); position: absolute; }
+  .opp-bar-fill.profit { background: var(--green); position: absolute; }
+
+  .opp-bar-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.6rem;
+    color: var(--text-dim);
+    margin-top: 0.25rem;
+  }
+
+  .opp-details {
+    display: none;
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border);
+  }
+
+  .opp-legs { display: flex; flex-direction: column; gap: 0.35rem; }
+
+  .opp-leg {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.7rem;
+    padding: 0.3rem 0.5rem;
+    background: var(--bg);
+    border-radius: 4px;
+  }
+  .opp-leg-title { color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .opp-leg-price { color: var(--cyan); font-weight: 600; margin-left: 0.5rem; }
+
+  .opp-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+  }
+
+  .opp-stat { text-align: center; }
+  .opp-stat-val { font-size: 0.85rem; font-weight: 700; }
+  .opp-stat-lbl { font-size: 0.55rem; color: var(--text-dim); text-transform: uppercase; }
+
+  /* ---- Near Misses ---- */
+  .near-miss-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid rgba(30,45,74,0.5);
+    font-size: 0.72rem;
+  }
+  .near-miss-item:last-child { border-bottom: none; }
+  .nm-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 0.75rem; }
+  .nm-prices { color: var(--text-dim); white-space: nowrap; }
+  .nm-spread {
+    margin-left: 0.5rem;
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    font-weight: 700;
+    font-size: 0.6rem;
+  }
+  .nm-spread.s1 { background: rgba(234,179,8,0.2); color: var(--yellow); }
+  .nm-spread.s2 { background: rgba(234,179,8,0.1); color: #a88a08; }
+  .nm-spread.s3 { background: rgba(234,179,8,0.05); color: #7a6a08; }
+
+  /* ---- Fee Curve ---- */
+  .fee-chart {
+    width: 100%;
+    height: 200px;
+    position: relative;
+  }
+
+  .fee-chart canvas { width: 100%; height: 100%; }
+
+  /* ---- Market Heatmap ---- */
+  .heatmap {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(38px, 1fr));
+    gap: 3px;
+  }
+
+  .heatmap-cell {
+    aspect-ratio: 1;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.55rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: transform 0.2s;
+    position: relative;
+  }
+  .heatmap-cell:hover { transform: scale(1.3); z-index: 10; }
+
+  .heatmap-tooltip {
+    display: none;
+    position: absolute;
+    bottom: 110%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 0.4rem 0.6rem;
+    border-radius: 6px;
+    font-size: 0.6rem;
+    white-space: nowrap;
+    z-index: 20;
+    pointer-events: none;
+  }
+  .heatmap-cell:hover .heatmap-tooltip { display: block; }
+
+  /* ---- Empty State ---- */
+  .empty-state {
+    text-align: center;
+    padding: 3rem 1rem;
+    color: var(--text-dim);
+  }
+  .empty-state-icon { font-size: 2.5rem; margin-bottom: 0.75rem; opacity: 0.4; }
+  .empty-state-text { font-size: 0.8rem; }
+
+  /* ---- Scrollable ---- */
+  .scrollable { max-height: 520px; overflow-y: auto; }
+  .scrollable::-webkit-scrollbar { width: 4px; }
+  .scrollable::-webkit-scrollbar-track { background: transparent; }
+  .scrollable::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  /* ---- Animations ---- */
+  .fade-in { animation: fadeIn 0.4s ease; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+  .slide-in { animation: slideIn 0.5s ease; }
+  @keyframes slideIn { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: none; } }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-left">
+    <div class="logo">CADENCE</div>
+    <span class="mode-badge demo" id="modeBadge">DEMO</span>
+  </div>
+  <div class="header-right">
+    <span class="last-scan" id="lastScan">Loading...</span>
+    <button class="refresh-btn" id="refreshBtn" onclick="fetchData()">Refresh</button>
+  </div>
+</div>
+
+<!-- Stats -->
+<div class="stats-row" id="statsRow"></div>
+
+<!-- Main -->
+<div class="main-grid">
+  <!-- Left: Opportunities -->
+  <div style="display:flex; flex-direction:column; gap:1.5rem;">
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Arbitrage Opportunities</span>
+        <div class="opp-filters" id="oppFilters">
+          <button class="filter-btn active" data-filter="all" onclick="setFilter('all',this)">All</button>
+          <button class="filter-btn" data-filter="binary" onclick="setFilter('binary',this)">Binary</button>
+          <button class="filter-btn" data-filter="multi-yes" onclick="setFilter('multi-yes',this)">Multi YES</button>
+          <button class="filter-btn" data-filter="multi-no" onclick="setFilter('multi-no',this)">Multi NO</button>
+        </div>
+      </div>
+      <div class="panel-body scrollable" id="oppList"></div>
+    </div>
+
+    <!-- Spread Heatmap -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Market Spread Heatmap</span>
+        <span style="font-size:0.6rem; color:var(--text-dim)">Yes+No spread by market</span>
+      </div>
+      <div class="panel-body" id="heatmapContainer"></div>
+    </div>
+  </div>
+
+  <!-- Right Sidebar -->
+  <div style="display:flex; flex-direction:column; gap:1.5rem;">
+    <!-- Fee Curve -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Kalshi Fee Curve</span>
+        <span style="font-size:0.6rem; color:var(--text-dim)">ceil(0.07 x P x (1-P))</span>
+      </div>
+      <div class="panel-body">
+        <div class="fee-chart">
+          <canvas id="feeCanvas"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Near Misses -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Near Misses</span>
+        <span style="font-size:0.6rem; color:var(--text-dim)">Within 3c of arb</span>
+      </div>
+      <div class="panel-body scrollable" id="nearMissList"></div>
+    </div>
+
+    <!-- Profit Breakdown -->
+    <div class="panel" id="profitPanel" style="display:none;">
+      <div class="panel-header">
+        <span class="panel-title">Profit Breakdown</span>
+      </div>
+      <div class="panel-body">
+        <canvas id="profitCanvas" height="200"></canvas>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---- State ----
+let data = null;
+let currentFilter = 'all';
+let autoRefreshInterval = null;
+
+// ---- Fetch ----
+async function fetchData() {
+  const btn = document.getElementById('refreshBtn');
+  btn.textContent = '...';
+  try {
+    const resp = await fetch('/api/scan');
+    data = await resp.json();
+    render();
+  } catch (e) {
+    console.error('Fetch error:', e);
+  }
+  btn.textContent = 'Refresh';
+}
+
+// ---- Render ----
+function render() {
+  if (!data) return;
+  renderHeader();
+  renderStats();
+  renderOpportunities();
+  renderNearMisses();
+  renderHeatmap();
+  renderFeeCurve();
+  renderProfitChart();
+}
+
+function renderHeader() {
+  const badge = document.getElementById('modeBadge');
+  badge.textContent = data.mode.toUpperCase();
+  badge.className = 'mode-badge ' + data.mode;
+
+  const ts = data.timestamp ? new Date(data.timestamp).toLocaleTimeString() : '—';
+  document.getElementById('lastScan').textContent = 'Last scan: ' + ts;
+}
+
+function renderStats() {
+  const s = data.summary;
+  const cards = [
+    { label: 'Markets', value: s.total_markets, color: 'blue' },
+    { label: 'Multi-Outcome Events', value: s.multi_outcome_events, color: 'purple' },
+    { label: 'Arb Opportunities', value: s.total_arb_count, color: 'green' },
+    { label: 'Binary Arbs', value: s.binary_arb_count, color: 'cyan' },
+    { label: 'Multi Arbs', value: s.multi_outcome_arb_count, color: 'yellow' },
+    { label: 'Near Misses', value: s.near_miss_count, color: 'red' },
+  ];
+
+  document.getElementById('statsRow').innerHTML = cards.map((c, i) => `
+    <div class="stat-card ${c.color} fade-in" style="animation-delay:${i * 60}ms">
+      <div class="stat-label">${c.label}</div>
+      <div class="stat-value ${c.color}">${c.value}</div>
+    </div>
+  `).join('');
+}
+
+function getOppClass(type) {
+  if (type === 'binary') return 'binary';
+  if (type.includes('YES')) return 'multi-yes';
+  return 'multi-no';
+}
+
+function getOppFilterType(type) {
+  if (type === 'binary') return 'binary';
+  if (type.includes('YES')) return 'multi-yes';
+  return 'multi-no';
+}
+
+function renderOpportunities() {
+  const container = document.getElementById('oppList');
+  let opps = data.opportunities;
+
+  if (currentFilter !== 'all') {
+    opps = opps.filter(o => getOppFilterType(o.type) === currentFilter);
+  }
+
+  if (opps.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-state-icon">&empty;</div>
+        <div class="empty-state-text">No opportunities found${currentFilter !== 'all' ? ' for this filter' : ''}.<br>Markets are efficient right now.</div>
+      </div>`;
+    return;
+  }
+
+  container.innerHTML = '<div class="opp-list">' + opps.map((o, i) => {
+    const cls = getOppClass(o.type);
+    const payout = o.guaranteed_payout;
+    const costPct = (o.total_cost / payout * 100).toFixed(1);
+    const feePct = (o.fee_cents / payout * 100).toFixed(1);
+    const profitPct = (o.net_profit_cents / payout * 100).toFixed(1);
+    const feeLeft = costPct;
+
+    const legs = o.markets.map(m => {
+      const price = m.yes_ask || m.no_ask;
+      const title = m.title || m.ticker;
+      return `<div class="opp-leg"><span class="opp-leg-title">${esc(title)}</span><span class="opp-leg-price">${price}c</span></div>`;
+    }).join('');
+
+    const typeLabel = o.type === 'binary' ? 'BINARY' : o.type.includes('YES') ? 'MULTI / BUY ALL YES' : 'MULTI / BUY ALL NO';
+
+    return `
+      <div class="opp-card type-${cls} slide-in" style="animation-delay:${i * 80}ms" onclick="this.classList.toggle('expanded')">
+        <div class="opp-top">
+          <div class="opp-info">
+            <div class="opp-type ${cls}">${typeLabel}</div>
+            <div class="opp-event">${esc(o.event_title)}</div>
+            <div class="opp-ticker">${esc(o.event_ticker)}</div>
+          </div>
+          <div class="opp-profit">
+            <div class="opp-profit-value">${o.net_profit_cents.toFixed(1)}c</div>
+            <div class="opp-profit-label">net profit</div>
+          </div>
+        </div>
+
+        <div class="opp-bar-row">
+          <div class="opp-bar-track">
+            <div class="opp-bar-fill cost" style="width:${costPct}%"></div>
+            <div class="opp-bar-fill fee" style="left:${feeLeft}%;width:${feePct}%"></div>
+            <div class="opp-bar-fill profit" style="left:${parseFloat(feeLeft)+parseFloat(feePct)}%;width:${profitPct}%"></div>
+          </div>
+        </div>
+        <div class="opp-bar-labels">
+          <span>Cost: ${o.total_cost}c</span>
+          <span style="color:var(--yellow)">Fee: ${o.fee_cents}c</span>
+          <span style="color:var(--green)">Net: ${o.net_profit_cents.toFixed(1)}c</span>
+          <span>Payout: ${payout}c</span>
+        </div>
+
+        <div class="opp-details">
+          <div class="opp-legs">${legs}</div>
+          <div class="opp-stats">
+            <div class="opp-stat">
+              <div class="opp-stat-val" style="color:var(--green)">${o.roi_percent.toFixed(1)}%</div>
+              <div class="opp-stat-lbl">Gross ROI</div>
+            </div>
+            <div class="opp-stat">
+              <div class="opp-stat-val" style="color:var(--yellow)">${o.fee_cents}c</div>
+              <div class="opp-stat-lbl">Taker Fees</div>
+            </div>
+            <div class="opp-stat">
+              <div class="opp-stat-val" style="color:var(--cyan)">${o.profit_cents}c</div>
+              <div class="opp-stat-lbl">Gross Profit</div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }).join('') + '</div>';
+}
+
+function renderNearMisses() {
+  const container = document.getElementById('nearMissList');
+  const nms = data.near_misses;
+
+  if (nms.length === 0) {
+    container.innerHTML = '<div class="empty-state"><div class="empty-state-text">No near misses</div></div>';
+    return;
+  }
+
+  container.innerHTML = nms.map(nm => {
+    const scls = nm.spread <= 1 ? 's1' : nm.spread <= 2 ? 's2' : 's3';
+    return `
+      <div class="near-miss-item">
+        <span class="nm-title">${esc(nm.title)}</span>
+        <span class="nm-prices">Y:${nm.yes_ask}c N:${nm.no_ask}c</span>
+        <span class="nm-spread ${scls}">${nm.spread}c</span>
+      </div>`;
+  }).join('');
+}
+
+function renderHeatmap() {
+  const container = document.getElementById('heatmapContainer');
+  const markets = data.markets.filter(m => m.yes_ask && m.no_ask && m.yes_ask > 0 && m.no_ask > 0);
+
+  if (markets.length === 0) {
+    container.innerHTML = '<div class="empty-state"><div class="empty-state-text">No market data</div></div>';
+    return;
+  }
+
+  // Sort by spread
+  markets.sort((a, b) => (a.yes_ask + a.no_ask) - (b.yes_ask + b.no_ask));
+
+  container.innerHTML = '<div class="heatmap">' + markets.map(m => {
+    const spread = m.yes_ask + m.no_ask;
+    let bg, color;
+    if (spread < 100) {
+      // Arb! Green
+      const intensity = Math.min(1, (100 - spread) / 10);
+      bg = `rgba(34,197,94,${0.3 + intensity * 0.5})`;
+      color = '#22c55e';
+    } else if (spread <= 102) {
+      // Near miss - yellow
+      const intensity = 1 - (spread - 100) / 3;
+      bg = `rgba(234,179,8,${0.15 + intensity * 0.3})`;
+      color = '#eab308';
+    } else {
+      // Normal
+      const intensity = Math.min(1, (spread - 100) / 10);
+      bg = `rgba(239,68,68,${0.05 + intensity * 0.15})`;
+      color = 'var(--text-dim)';
+    }
+
+    return `<div class="heatmap-cell" style="background:${bg};color:${color}">
+      ${spread}
+      <div class="heatmap-tooltip">${esc(m.title)}<br>Y:${m.yes_ask}c + N:${m.no_ask}c = ${spread}c</div>
+    </div>`;
+  }).join('') + '</div>';
+}
+
+// ---- Fee Curve (Canvas) ----
+function renderFeeCurve() {
+  const canvas = document.getElementById('feeCanvas');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = 200 * dpr;
+  canvas.style.width = rect.width + 'px';
+  canvas.style.height = '200px';
+  ctx.scale(dpr, dpr);
+
+  const W = rect.width, H = 200;
+  const pad = { top: 20, right: 20, bottom: 30, left: 40 };
+  const plotW = W - pad.left - pad.right;
+  const plotH = H - pad.top - pad.bottom;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // Grid
+  ctx.strokeStyle = 'rgba(30,45,74,0.5)';
+  ctx.lineWidth = 0.5;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.top + (plotH / 4) * i;
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
+  }
+
+  // Compute fee curve
+  const points = [];
+  let maxFee = 0;
+  for (let p = 1; p < 100; p++) {
+    const fee = Math.ceil(0.07 * (p/100) * (1 - p/100) * 100);
+    points.push({ p, fee });
+    maxFee = Math.max(maxFee, fee);
+  }
+
+  const xScale = p => pad.left + ((p - 1) / 98) * plotW;
+  const yScale = f => pad.top + plotH - (f / (maxFee + 0.5)) * plotH;
+
+  // Taker curve
+  ctx.beginPath();
+  ctx.strokeStyle = '#3b82f6';
+  ctx.lineWidth = 2;
+  points.forEach((pt, i) => {
+    const x = xScale(pt.p), y = yScale(pt.fee);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Fill under
+  ctx.lineTo(xScale(99), yScale(0));
+  ctx.lineTo(xScale(1), yScale(0));
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + plotH);
+  grad.addColorStop(0, 'rgba(59,130,246,0.2)');
+  grad.addColorStop(1, 'rgba(59,130,246,0)');
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Maker curve
+  ctx.beginPath();
+  ctx.strokeStyle = '#a855f7';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([4, 3]);
+  for (let p = 1; p < 100; p++) {
+    const fee = Math.ceil(0.0175 * (p/100) * (1 - p/100) * 100);
+    const x = xScale(p), y = yScale(fee);
+    p === 1 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Axes labels
+  ctx.fillStyle = 'var(--text-dim)';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'center';
+  [1, 25, 50, 75, 99].forEach(p => {
+    ctx.fillStyle = '#7a8ba8';
+    ctx.fillText(p + 'c', xScale(p), H - 8);
+  });
+
+  ctx.textAlign = 'right';
+  for (let i = 0; i <= maxFee; i++) {
+    ctx.fillStyle = '#7a8ba8';
+    ctx.fillText(i + 'c', pad.left - 6, yScale(i) + 3);
+  }
+
+  // Legend
+  ctx.fillStyle = '#3b82f6';
+  ctx.fillRect(W - 100, 8, 12, 3);
+  ctx.fillStyle = '#7a8ba8';
+  ctx.textAlign = 'left';
+  ctx.fillText('Taker', W - 84, 12);
+
+  ctx.fillStyle = '#a855f7';
+  ctx.fillRect(W - 100, 20, 12, 3);
+  ctx.fillStyle = '#7a8ba8';
+  ctx.fillText('Maker', W - 84, 24);
+}
+
+// ---- Profit Breakdown Chart ----
+function renderProfitChart() {
+  const panel = document.getElementById('profitPanel');
+  if (!data.opportunities.length) { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+
+  const canvas = document.getElementById('profitCanvas');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = 200 * dpr;
+  canvas.style.width = rect.width + 'px';
+  canvas.style.height = '200px';
+  ctx.scale(dpr, dpr);
+
+  const W = rect.width, H = 200;
+  const pad = { top: 10, right: 10, bottom: 40, left: 10 };
+  const opps = data.opportunities.slice(0, 8);
+  const barW = Math.min(40, (W - pad.left - pad.right) / opps.length - 8);
+  const gap = (W - pad.left - pad.right - barW * opps.length) / (opps.length + 1);
+
+  const maxVal = Math.max(...opps.map(o => o.guaranteed_payout));
+  const yScale = v => pad.top + (H - pad.top - pad.bottom) * (1 - v / maxVal);
+
+  ctx.clearRect(0, 0, W, H);
+
+  opps.forEach((o, i) => {
+    const x = pad.left + gap + i * (barW + gap);
+
+    // Payout bar (dim)
+    const yP = yScale(o.guaranteed_payout);
+    ctx.fillStyle = 'rgba(30,45,74,0.5)';
+    ctx.fillRect(x, yP, barW, H - pad.bottom - yP);
+
+    // Cost bar
+    const yC = yScale(o.total_cost);
+    ctx.fillStyle = 'rgba(239,68,68,0.6)';
+    ctx.fillRect(x, yC, barW, H - pad.bottom - yC);
+
+    // Fee bar on top of cost
+    const yF = yScale(o.total_cost + o.fee_cents);
+    ctx.fillStyle = 'rgba(234,179,8,0.7)';
+    ctx.fillRect(x, yF, barW, yC - yF);
+
+    // Net profit
+    const netTop = yScale(o.guaranteed_payout);
+    const netH = yF - netTop;
+    ctx.fillStyle = 'rgba(34,197,94,0.7)';
+    ctx.fillRect(x, netTop, barW, netH);
+
+    // Label
+    ctx.fillStyle = '#7a8ba8';
+    ctx.font = '9px monospace';
+    ctx.textAlign = 'center';
+    ctx.save();
+    ctx.translate(x + barW / 2, H - 5);
+    ctx.rotate(-0.5);
+    const label = o.event_ticker.length > 8 ? o.event_ticker.substring(0, 8) + '..' : o.event_ticker;
+    ctx.fillText(label, 0, 0);
+    ctx.restore();
+  });
+}
+
+// ---- Filters ----
+function setFilter(f, el) {
+  currentFilter = f;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+  renderOpportunities();
+}
+
+// ---- Utils ----
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ---- Init ----
+fetchData();
+// Auto-refresh every 15s
+autoRefreshInterval = setInterval(fetchData, 15000);
+
+// Resize handler
+window.addEventListener('resize', () => {
+  if (data) { renderFeeCurve(); renderProfitChart(); }
+});
+</script>
+
+</body>
+</html>
