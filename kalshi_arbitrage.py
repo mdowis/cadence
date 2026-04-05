@@ -77,7 +77,10 @@ class ArbitrageOpportunity:
 # ---------------------------------------------------------------------------
 
 class KalshiClient:
-    """Client for the Kalshi public (unauthenticated) API."""
+    """Client for the Kalshi public (unauthenticated) API with rate limit handling."""
+
+    MAX_RETRIES = 4
+    BASE_DELAY = 0.1  # seconds between paginated requests
 
     def __init__(self, base_url=KALSHI_API_BASE):
         self.base_url = base_url
@@ -87,15 +90,33 @@ class KalshiClient:
             "User-Agent": "cadence-arbitrage-scanner/1.0",
         })
 
+    def _request(self, method, url, **kwargs):
+        """Make a request with retry on 429 (rate limit) responses."""
+        for attempt in range(self.MAX_RETRIES):
+            resp = self.session.request(method, url, **kwargs)
+            if resp.status_code != 429:
+                resp.raise_for_status()
+                return resp.json()
+            # Respect Retry-After header, fall back to exponential backoff
+            retry_after = resp.headers.get("Retry-After")
+            if retry_after:
+                delay = float(retry_after)
+            else:
+                delay = 2 ** attempt  # 1s, 2s, 4s, 8s
+            print(f"  Rate limited (429). Retrying in {delay:.1f}s (attempt {attempt + 1}/{self.MAX_RETRIES})...")
+            time.sleep(delay)
+        # Final attempt — let it raise on failure
+        resp = self.session.request(method, url, **kwargs)
+        resp.raise_for_status()
+        return resp.json()
+
     def get_markets(self, limit=200, cursor=None, status="open", event_ticker=None):
         params = {"limit": limit, "status": status}
         if cursor:
             params["cursor"] = cursor
         if event_ticker:
             params["event_ticker"] = event_ticker
-        resp = self.session.get(f"{self.base_url}/markets", params=params)
-        resp.raise_for_status()
-        return resp.json()
+        return self._request("GET", f"{self.base_url}/markets", params=params)
 
     def get_all_markets(self, status="open"):
         all_markets = []
@@ -109,13 +130,11 @@ class KalshiClient:
             cursor = data.get("cursor")
             if not cursor:
                 break
-            time.sleep(0.1)
+            time.sleep(self.BASE_DELAY)
         return all_markets
 
     def get_orderbook(self, ticker):
-        resp = self.session.get(f"{self.base_url}/orderbook/{ticker}")
-        resp.raise_for_status()
-        return resp.json()
+        return self._request("GET", f"{self.base_url}/orderbook/{ticker}")
 
 
 # ---------------------------------------------------------------------------
