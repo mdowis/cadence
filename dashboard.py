@@ -33,6 +33,7 @@ from kalshi_arbitrage import (
     total_arb_fee,
     KALSHI_API_BASE,
 )
+from risk_manager import RiskManager, RiskConfig
 
 # Shared state for the latest scan results
 _latest_scan = {
@@ -45,6 +46,9 @@ _latest_scan = {
     "error": None,
 }
 _scan_lock = threading.Lock()
+
+# Shared risk manager instance (initialized in main)
+_risk_mgr = None
 
 
 def run_scan(markets, min_profit=1, mode="demo"):
@@ -138,6 +142,13 @@ def background_scanner(client, interval, min_profit):
 class DashboardHandler(SimpleHTTPRequestHandler):
     """HTTP handler that serves the dashboard and JSON API."""
 
+    def _json_response(self, data, status=200):
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode())
+
     def do_GET(self):
         if self.path == "/" or self.path == "/index.html":
             self.send_response(200)
@@ -146,16 +157,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             html_path = Path(__file__).parent / "dashboard.html"
             self.wfile.write(html_path.read_bytes())
         elif self.path == "/api/scan":
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
             with _scan_lock:
-                self.wfile.write(json.dumps(_latest_scan).encode())
+                self._json_response(_latest_scan)
+        elif self.path == "/api/risk":
+            if _risk_mgr:
+                self._json_response(_risk_mgr.get_status())
+            else:
+                self._json_response({"error": "Risk manager not initialized"})
         elif self.path == "/api/fee-curve":
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
             curve = []
             for p in range(1, 100):
                 curve.append({
@@ -163,9 +172,35 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     "taker_fee": kalshi_fee_per_contract(p),
                     "maker_fee": kalshi_fee_per_contract(p, maker=True),
                 })
-            self.wfile.write(json.dumps(curve).encode())
+            self._json_response(curve)
         else:
             super().do_GET()
+
+    def do_POST(self):
+        if self.path == "/api/risk/kill-switch/activate":
+            if _risk_mgr:
+                content_len = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(content_len)) if content_len else {}
+                reason = body.get("reason", "Dashboard manual activation")
+                _risk_mgr.activate_kill_switch(reason)
+                self._json_response({"status": "activated", "reason": reason})
+            else:
+                self._json_response({"error": "Risk manager not initialized"}, 400)
+        elif self.path == "/api/risk/kill-switch/deactivate":
+            if _risk_mgr:
+                _risk_mgr.deactivate_kill_switch()
+                self._json_response({"status": "deactivated"})
+            else:
+                self._json_response({"error": "Risk manager not initialized"}, 400)
+        elif self.path == "/api/risk/reset-daily":
+            if _risk_mgr:
+                _risk_mgr.reset_daily()
+                self._json_response({"status": "daily counters reset"})
+            else:
+                self._json_response({"error": "Risk manager not initialized"}, 400)
+        else:
+            self.send_response(404)
+            self.end_headers()
 
     def log_message(self, format, *args):
         pass  # Suppress request logs
@@ -183,7 +218,19 @@ def main():
     parser.add_argument("--api-key", help="Kalshi API key secret")
     parser.add_argument("--email", help="Kalshi email")
     parser.add_argument("--password", help="Kalshi password")
+    parser.add_argument("--equity", type=int, default=5000,
+                        help="Starting equity in cents for risk manager (default: 5000)")
+    parser.add_argument("--state-file", default=None,
+                        help="File to persist risk state")
     args = parser.parse_args()
+
+    # Initialize risk manager
+    global _risk_mgr
+    _risk_mgr = RiskManager(
+        config=RiskConfig(),
+        starting_equity_cents=args.equity,
+        state_file=args.state_file,
+    )
 
     # Initial scan with demo data
     run_scan(DEMO_MARKETS, args.min_profit, mode="demo")

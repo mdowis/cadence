@@ -406,6 +406,94 @@
 
   .slide-in { animation: slideIn 0.5s ease; }
   @keyframes slideIn { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: none; } }
+
+  /* ---- Risk Panel ---- */
+  .risk-panel { position: relative; }
+  .risk-panel.kill-active { border-color: var(--red); }
+  .risk-panel.kill-active .panel-header { background: rgba(239,68,68,0.15); }
+
+  .kill-banner {
+    background: var(--red);
+    color: #fff;
+    text-align: center;
+    padding: 0.5rem;
+    font-size: 0.7rem;
+    font-weight: 800;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    animation: pulse 1.5s infinite;
+  }
+
+  .risk-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .risk-metric {
+    background: var(--bg);
+    border-radius: 6px;
+    padding: 0.5rem 0.6rem;
+    text-align: center;
+  }
+  .risk-metric-val { font-size: 1rem; font-weight: 700; line-height: 1.2; }
+  .risk-metric-lbl { font-size: 0.55rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+
+  .drawdown-bar {
+    height: 8px;
+    background: var(--bg);
+    border-radius: 4px;
+    overflow: hidden;
+    margin: 0.5rem 0;
+  }
+  .drawdown-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.5s ease, background 0.5s ease;
+  }
+
+  .risk-btn {
+    width: 100%;
+    padding: 0.5rem;
+    border-radius: 6px;
+    border: 1px solid;
+    font-family: inherit;
+    font-size: 0.7rem;
+    font-weight: 700;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    transition: all 0.2s;
+    margin-top: 0.5rem;
+  }
+  .risk-btn.kill {
+    border-color: var(--red);
+    background: rgba(239,68,68,0.1);
+    color: var(--red);
+  }
+  .risk-btn.kill:hover { background: var(--red); color: #fff; }
+  .risk-btn.resume {
+    border-color: var(--green);
+    background: rgba(34,197,94,0.1);
+    color: var(--green);
+  }
+  .risk-btn.resume:hover { background: var(--green); color: #000; }
+
+  .risk-events {
+    max-height: 120px;
+    overflow-y: auto;
+    margin-top: 0.5rem;
+  }
+  .risk-event {
+    font-size: 0.6rem;
+    padding: 0.25rem 0;
+    border-bottom: 1px solid rgba(30,45,74,0.3);
+    display: flex;
+    justify-content: space-between;
+  }
+  .risk-event-type { color: var(--yellow); }
+  .risk-event-time { color: var(--text-dim); }
 </style>
 </head>
 <body>
@@ -454,6 +542,27 @@
 
   <!-- Right Sidebar -->
   <div style="display:flex; flex-direction:column; gap:1.5rem;">
+    <!-- Risk Management -->
+    <div class="panel risk-panel" id="riskPanel">
+      <div id="killBanner" class="kill-banner" style="display:none">KILL SWITCH ACTIVE — ALL TRADING HALTED</div>
+      <div class="panel-header">
+        <span class="panel-title">Risk Management</span>
+        <span style="font-size:0.6rem; color:var(--text-dim)" id="riskMode">—</span>
+      </div>
+      <div class="panel-body" id="riskBody">
+        <div class="risk-grid" id="riskGrid"></div>
+        <div style="font-size:0.6rem; color:var(--text-dim); margin-bottom:0.25rem">DRAWDOWN</div>
+        <div class="drawdown-bar"><div class="drawdown-fill" id="drawdownFill"></div></div>
+        <div style="display:flex;justify-content:space-between;font-size:0.55rem;color:var(--text-dim)">
+          <span id="drawdownLabel">0%</span>
+          <span id="drawdownLimit">Limit: —</span>
+        </div>
+        <div id="riskButtons"></div>
+        <div style="font-size:0.6rem; color:var(--text-dim); margin-top:0.75rem">RECENT EVENTS</div>
+        <div class="risk-events" id="riskEvents"></div>
+      </div>
+    </div>
+
     <!-- Fee Curve -->
     <div class="panel">
       <div class="panel-header">
@@ -491,6 +600,7 @@
 <script>
 // ---- State ----
 let data = null;
+let riskData = null;
 let currentFilter = 'all';
 let autoRefreshInterval = null;
 
@@ -499,13 +609,28 @@ async function fetchData() {
   const btn = document.getElementById('refreshBtn');
   btn.textContent = '...';
   try {
-    const resp = await fetch('/api/scan');
-    data = await resp.json();
+    const [scanResp, riskResp] = await Promise.all([
+      fetch('/api/scan'),
+      fetch('/api/risk'),
+    ]);
+    data = await scanResp.json();
+    riskData = await riskResp.json();
     render();
   } catch (e) {
     console.error('Fetch error:', e);
   }
   btn.textContent = 'Refresh';
+}
+
+async function killSwitch(activate) {
+  const url = activate ? '/api/risk/kill-switch/activate' : '/api/risk/kill-switch/deactivate';
+  await fetch(url, { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+  fetchData();
+}
+
+async function resetDaily() {
+  await fetch('/api/risk/reset-daily', { method: 'POST' });
+  fetchData();
 }
 
 // ---- Render ----
@@ -518,6 +643,7 @@ function render() {
   renderHeatmap();
   renderFeeCurve();
   renderProfitChart();
+  if (riskData) renderRisk();
 }
 
 function renderHeader() {
@@ -863,6 +989,100 @@ function renderProfitChart() {
     ctx.fillText(label, 0, 0);
     ctx.restore();
   });
+}
+
+// ---- Risk Panel ----
+function renderRisk() {
+  const r = riskData;
+  if (r.error) return;
+
+  const panel = document.getElementById('riskPanel');
+  const banner = document.getElementById('killBanner');
+  const killActive = r.kill_switch_active;
+
+  // Kill switch banner
+  if (killActive) {
+    panel.classList.add('kill-active');
+    banner.style.display = 'block';
+  } else {
+    panel.classList.remove('kill-active');
+    banner.style.display = 'none';
+  }
+
+  // Mode label
+  document.getElementById('riskMode').textContent = killActive ? 'HALTED' : 'Active';
+
+  // Metrics grid
+  const equityDollars = (r.equity_cents / 100).toFixed(2);
+  const dailyPnl = r.daily_pnl_cents;
+  const dailyColor = dailyPnl >= 0 ? 'var(--green)' : 'var(--red)';
+  const dailySign = dailyPnl >= 0 ? '+' : '';
+  const exposureDollars = (r.total_exposure_cents / 100).toFixed(2);
+
+  document.getElementById('riskGrid').innerHTML = `
+    <div class="risk-metric">
+      <div class="risk-metric-val" style="color:var(--cyan)">$${equityDollars}</div>
+      <div class="risk-metric-lbl">Equity</div>
+    </div>
+    <div class="risk-metric">
+      <div class="risk-metric-val" style="color:${dailyColor}">${dailySign}${dailyPnl}c</div>
+      <div class="risk-metric-lbl">Daily P&L</div>
+    </div>
+    <div class="risk-metric">
+      <div class="risk-metric-val" style="color:var(--yellow)">$${exposureDollars}</div>
+      <div class="risk-metric-lbl">Exposure</div>
+    </div>
+    <div class="risk-metric">
+      <div class="risk-metric-val">${r.open_position_count}</div>
+      <div class="risk-metric-lbl">Open Positions</div>
+    </div>
+    <div class="risk-metric">
+      <div class="risk-metric-val">${r.daily_trade_count}</div>
+      <div class="risk-metric-lbl">Trades Today</div>
+    </div>
+    <div class="risk-metric">
+      <div class="risk-metric-val" style="color:${r.consecutive_losses >= 3 ? 'var(--red)' : 'var(--text)'}">${r.consecutive_losses}</div>
+      <div class="risk-metric-lbl">Consec. Losses</div>
+    </div>
+  `;
+
+  // Drawdown bar
+  const maxDd = r.config.max_drawdown_pct || 100;
+  const ddPct = r.drawdown_pct;
+  const ddFillPct = Math.min(100, (ddPct / maxDd) * 100);
+  const ddFill = document.getElementById('drawdownFill');
+  ddFill.style.width = ddFillPct + '%';
+  ddFill.style.background = ddPct < maxDd * 0.5 ? 'var(--green)' :
+                             ddPct < maxDd * 0.75 ? 'var(--yellow)' : 'var(--red)';
+  document.getElementById('drawdownLabel').textContent = ddPct.toFixed(1) + '% drawn down';
+  document.getElementById('drawdownLimit').textContent = 'Kill at ' + maxDd + '%';
+
+  // Buttons
+  const btnContainer = document.getElementById('riskButtons');
+  if (killActive) {
+    btnContainer.innerHTML = `
+      <button class="risk-btn resume" onclick="killSwitch(false)">Resume Trading</button>
+      <div style="font-size:0.6rem;color:var(--text-dim);margin-top:0.3rem;text-align:center">${esc(r.kill_switch_reason)}</div>
+    `;
+  } else {
+    btnContainer.innerHTML = `
+      <button class="risk-btn kill" onclick="if(confirm('Halt ALL trading immediately?')) killSwitch(true)">Emergency Kill Switch</button>
+    `;
+  }
+
+  // Risk events
+  const eventsContainer = document.getElementById('riskEvents');
+  const events = r.risk_events || [];
+  if (events.length === 0) {
+    eventsContainer.innerHTML = '<div style="font-size:0.6rem;color:var(--text-dim);padding:0.3rem 0">No events</div>';
+  } else {
+    eventsContainer.innerHTML = events.slice().reverse().map(e => `
+      <div class="risk-event">
+        <span class="risk-event-type">${esc(e.type)}</span>
+        <span class="risk-event-time">${e.time_str || ''}</span>
+      </div>
+    `).join('');
+  }
 }
 
 // ---- Filters ----
