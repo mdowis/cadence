@@ -10,15 +10,17 @@ limits via RiskConfig and monitor the dashboard.
 
 Usage:
     # Dry run (scan + risk check, no orders)
-    python executor.py --api-key-id X --api-key K --dry-run
+    python executor.py --api-key-id X --private-key-path key.pem --dry-run
 
     # Live auto-trading with $50 equity, $5 max per trade
-    python executor.py --api-key-id X --api-key K \\
+    python executor.py --api-key-id X --private-key-path key.pem \\
         --equity 5000 --max-per-trade 500
 
     # With state persistence (resumes on restart)
-    python executor.py --api-key-id X --api-key K \\
+    python executor.py --api-key-id X --private-key-path key.pem \\
         --equity 5000 --state-file risk_state.json
+
+Or put KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH in .env and omit the flags.
 """
 
 import argparse
@@ -383,8 +385,9 @@ def main():
     auth = parser.add_argument_group("authentication")
     auth.add_argument("--api-key-id",
                       help="Kalshi API key ID (or KALSHI_API_KEY_ID env var)")
-    auth.add_argument("--api-key",
-                      help="Kalshi API key (or KALSHI_API_KEY env var)")
+    auth.add_argument("--private-key-path",
+                      help="Path to RSA private key PEM file "
+                           "(or KALSHI_PRIVATE_KEY_PATH env var)")
     auth.add_argument("--email", help="Kalshi email (or KALSHI_EMAIL env var)")
     auth.add_argument("--password",
                       help="Kalshi password (or KALSHI_PASSWORD env var)")
@@ -393,19 +396,19 @@ def main():
 
     # Build trader client
     api_key_id = args.api_key_id or os.environ.get("KALSHI_API_KEY_ID")
-    api_key = args.api_key or os.environ.get("KALSHI_API_KEY")
+    private_key_path = args.private_key_path or os.environ.get("KALSHI_PRIVATE_KEY_PATH")
     email = args.email or os.environ.get("KALSHI_EMAIL")
     password = args.password or os.environ.get("KALSHI_PASSWORD")
 
-    if not args.dry_run and not (api_key_id or email):
+    if not args.dry_run and not ((api_key_id and private_key_path) or email):
         print("ERROR: Live trading requires authentication.")
-        print("  Use --api-key-id + --api-key, or --email + --password")
+        print("  Use --api-key-id + --private-key-path, or --email + --password")
         print("  Or use --dry-run to test without trading.")
         sys.exit(1)
 
     trader = KalshiTrader(
         base_url=KALSHI_API_BASE,
-        api_key_id=api_key_id, api_key=api_key,
+        api_key_id=api_key_id, private_key_path=private_key_path,
         email=email, password=password,
     )
 

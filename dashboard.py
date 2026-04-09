@@ -9,7 +9,7 @@ auto-executor from the browser.
 Usage:
     # 1. Copy .env.example to .env and add your API key
     cp .env.example .env
-    # 2. Edit .env with your KALSHI_API_KEY_ID and KALSHI_API_KEY
+    # 2. Edit .env: add KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH
     # 3. Run
     python dashboard.py
     # 4. Open http://localhost:8050 and click "Start Scanner"
@@ -357,7 +357,7 @@ def main():
         epilog="""
 All configuration via .env file or environment variables:
   KALSHI_API_KEY_ID        Your Kalshi API key ID
-  KALSHI_API_KEY           Your Kalshi API key secret
+  KALSHI_PRIVATE_KEY_PATH  Path to your Kalshi RSA private key PEM file
   CADENCE_PORT             Dashboard port (default 8050)
   CADENCE_EQUITY           Starting equity in cents if balance sync disabled
   CADENCE_SYNC_BALANCE     Use live Kalshi balance (default true)
@@ -397,15 +397,20 @@ Then open http://localhost:8050
 
     # 3. Initialize Kalshi trader (authenticated if creds present)
     api_key_id = os.environ.get("KALSHI_API_KEY_ID")
-    api_key = os.environ.get("KALSHI_API_KEY")
+    private_key_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH")
     email = os.environ.get("KALSHI_EMAIL")
     password = os.environ.get("KALSHI_PASSWORD")
 
-    _trader = KalshiTrader(
-        base_url=KALSHI_API_BASE,
-        api_key_id=api_key_id, api_key=api_key,
-        email=email, password=password,
-    )
+    try:
+        _trader = KalshiTrader(
+            base_url=KALSHI_API_BASE,
+            api_key_id=api_key_id, private_key_path=private_key_path,
+            email=email, password=password,
+        )
+    except (FileNotFoundError, RuntimeError) as e:
+        print(f"  WARNING: Auth setup failed: {e}")
+        print(f"  Starting in demo-only mode.\n")
+        _trader = KalshiTrader(base_url=KALSHI_API_BASE)
 
     authenticated = _trader.authenticated
 
@@ -445,7 +450,7 @@ Then open http://localhost:8050
         print(f"  Max per trade:  ${risk_config.max_per_trade_cents/100:.2f}")
         print(f"  Daily limit:    ${risk_config.daily_loss_limit_cents/100:.2f}")
     else:
-        print(f"  Set KALSHI_API_KEY_ID and KALSHI_API_KEY in .env for live mode")
+        print(f"  Set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH in .env for live mode")
     print()
     print(f"  Dashboard:  http://localhost:{args.port}")
     print(f"  Press Ctrl+C to stop")

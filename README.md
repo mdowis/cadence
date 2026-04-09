@@ -168,15 +168,31 @@ cp .env.example .env
 
 ### Authentication (required for trading)
 
-```bash
-# Primary: API key (recommended)
-KALSHI_API_KEY_ID=your_key_id
-KALSHI_API_KEY=your_key_secret
+Kalshi uses RSA-PSS signed requests. When you create an API key pair at https://kalshi.com/account/api-keys you get two things:
 
-# Alternative: email/password (gets a 24h JWT)
+1. **API key ID** (a short string shown in the dashboard)
+2. **Private key PEM file** (downloaded once — keep it safe!)
+
+Put the PEM file somewhere on your machine and point Cadence at it:
+
+```bash
+# Primary: API key ID + path to your PEM file
+KALSHI_API_KEY_ID=your_key_id
+KALSHI_PRIVATE_KEY_PATH=/path/to/your/kalshi_private_key.pem
+
+# Alternative: email/password (gets a 24h JWT, less preferred)
 KALSHI_EMAIL=you@example.com
 KALSHI_PASSWORD=yourpass
 ```
+
+Every request Cadence sends to Kalshi is signed with your private key:
+```
+KALSHI-ACCESS-KEY        = your API key ID
+KALSHI-ACCESS-TIMESTAMP  = current Unix time in ms
+KALSHI-ACCESS-SIGNATURE  = base64(RSA-PSS sign(timestamp + METHOD + path))
+```
+
+The signer uses the `cryptography` Python package if available; otherwise it falls back to the `openssl` CLI tool (pre-installed on Mac/Linux, available via Git Bash or WSL on Windows). No `pip install` required for either path.
 
 Without credentials, the dashboard still runs in demo mode so you can explore the UI.
 

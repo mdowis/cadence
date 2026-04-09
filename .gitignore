@@ -5,3 +5,5 @@ __pycache__/
 venv/
 risk_state.json
 *.state.json
+*.pem
+*.key

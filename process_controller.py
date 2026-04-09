@@ -84,7 +84,7 @@ class ProcessController:
             if interval:
                 self.interval = interval
             if not self.trader or not self.trader.authenticated:
-                return False, "Not authenticated - set KALSHI_API_KEY_ID and KALSHI_API_KEY"
+                return False, "Not authenticated - set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH"
 
             self._scanner_stop.clear()
             self.scanner_status = ProcessStatus(
@@ -160,7 +160,7 @@ class ProcessController:
             if self._executor_thread and self._executor_thread.is_alive():
                 return False, "Executor already running"
             if not self.trader or not self.trader.authenticated:
-                return False, "Not authenticated - set KALSHI_API_KEY_ID and KALSHI_API_KEY"
+                return False, "Not authenticated - set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH"
             if not (self._scanner_thread and self._scanner_thread.is_alive()):
                 return False, "Scanner must be running before starting executor"
 

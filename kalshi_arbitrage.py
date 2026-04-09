@@ -10,10 +10,10 @@ Scans Kalshi prediction markets for mispriced opportunities:
 Supports both authenticated (higher rate limits) and unauthenticated access.
 
 Usage:
-    python kalshi_arbitrage.py --demo                      # Verify logic with sample data
-    python kalshi_arbitrage.py                             # Scan live (unauthenticated)
-    python kalshi_arbitrage.py --api-key-id X --api-key K  # Scan live (authenticated)
-    python kalshi_arbitrage.py --continuous --interval 15   # Rescan every 15s
+    python kalshi_arbitrage.py --demo                    # Verify logic with sample data
+    python kalshi_arbitrage.py                           # Scan live (unauthenticated)
+    python kalshi_arbitrage.py --api-key-id X --private-key-path key.pem
+    python kalshi_arbitrage.py --continuous --interval 15
 """
 
 import argparse
@@ -150,7 +150,151 @@ class HTTPClient:
         return self.request("POST", url, **kwargs)
 
 
-KALSHI_API_BASE = "https://trading-api.kalshi.com/trade-api/v2"
+# ---------------------------------------------------------------------------
+# Kalshi RSA-PSS request signer
+# ---------------------------------------------------------------------------
+#
+# Kalshi authenticates API requests by signing a message with your RSA
+# private key. You download the private key as a PEM file when you create
+# an API key pair in the Kalshi dashboard.
+#
+# For each request the client must set three headers:
+#   KALSHI-ACCESS-KEY        = your API key ID
+#   KALSHI-ACCESS-TIMESTAMP  = current Unix time in milliseconds
+#   KALSHI-ACCESS-SIGNATURE  = base64(sign_rsa_pss(timestamp + METHOD + path))
+#
+# The signature uses RSA-PSS padding with SHA-256 and MGF1+SHA-256,
+# salt length equal to the digest length. The path is the URL path WITHOUT
+# the query string.
+
+class KalshiSigner:
+    """
+    Signs Kalshi API requests with an RSA private key (PEM file).
+
+    Tries two backends in order:
+      1. `cryptography` package (fast, preferred if available)
+      2. `openssl` CLI subprocess (zero-install fallback, works on any
+         system with openssl installed, which is almost all of them)
+    """
+
+    def __init__(self, private_key_path):
+        if not os.path.exists(private_key_path):
+            raise FileNotFoundError(
+                f"Private key file not found: {private_key_path}\n"
+                f"Download your PEM file when creating a Kalshi API key and "
+                f"set KALSHI_PRIVATE_KEY_PATH in .env"
+            )
+        self.private_key_path = os.path.abspath(private_key_path)
+        self._cached_key = None
+        self.backend = None
+
+        # Try cryptography first. Catch broadly because broken/partial
+        # installs can raise various errors at import or use time.
+        # Suppress stderr during the attempt so broken Rust/cffi installs
+        # don't spew panic traces onto the user's terminal.
+        _stderr_fd = None
+        _devnull_fd = None
+        try:
+            _stderr_fd = os.dup(2)
+            _devnull_fd = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(_devnull_fd, 2)
+
+            from cryptography.hazmat.primitives import serialization
+            with open(self.private_key_path, "rb") as f:
+                self._cached_key = serialization.load_pem_private_key(
+                    f.read(), password=None
+                )
+            self.backend = "cryptography"
+        except (ImportError, ModuleNotFoundError):
+            pass  # fall through to openssl
+        except BaseException:
+            # Broken cryptography install, malformed key, or other failure.
+            # Don't give up — try openssl fallback below.
+            pass
+        finally:
+            # Restore stderr
+            if _stderr_fd is not None:
+                try:
+                    os.dup2(_stderr_fd, 2)
+                    os.close(_stderr_fd)
+                except Exception:
+                    pass
+            if _devnull_fd is not None:
+                try:
+                    os.close(_devnull_fd)
+                except Exception:
+                    pass
+
+        if self.backend == "cryptography":
+            return
+
+        # Fall back to openssl CLI
+        import subprocess
+        try:
+            subprocess.run(
+                ["openssl", "version"],
+                capture_output=True, check=True,
+            )
+            self.backend = "openssl"
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            raise RuntimeError(
+                "Cannot sign Kalshi requests. Need ONE of:\n"
+                "  1. The 'cryptography' Python package "
+                "(pip install cryptography), or\n"
+                "  2. The 'openssl' command-line tool on your PATH\n"
+                "openssl is pre-installed on most systems. On Windows try "
+                "Git Bash, WSL, or install OpenSSL from slproweb.com."
+            )
+
+    def sign(self, timestamp_ms, method, path):
+        """
+        Sign a Kalshi API request.
+
+        Args:
+            timestamp_ms: Current Unix time in milliseconds, as a string or int
+            method: HTTP method in uppercase (e.g. "GET", "POST")
+            path: URL path WITHOUT query string (e.g. "/trade-api/v2/markets")
+
+        Returns:
+            Base64-encoded signature string.
+        """
+        import base64
+        # Strip query string if caller accidentally passed it
+        if "?" in path:
+            path = path.split("?", 1)[0]
+
+        message = f"{timestamp_ms}{method}{path}".encode("utf-8")
+
+        if self.backend == "cryptography":
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.primitives.asymmetric import padding
+            signature = self._cached_key.sign(
+                message,
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.DIGEST_LENGTH,
+                ),
+                hashes.SHA256(),
+            )
+            return base64.b64encode(signature).decode("ascii")
+
+        # openssl CLI fallback
+        import subprocess
+        result = subprocess.run(
+            [
+                "openssl", "dgst", "-sha256",
+                "-sign", self.private_key_path,
+                "-sigopt", "rsa_padding_mode:pss",
+                "-sigopt", "rsa_pss_saltlen:digest",
+            ],
+            input=message,
+            capture_output=True,
+            check=True,
+        )
+        return base64.b64encode(result.stdout).decode("ascii")
+
+
+KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
 # Kalshi quadratic fee: ceil(coefficient * contracts * P * (1 - P))
 # where P = price in dollars (e.g. 0.50 for 50¢)
@@ -240,17 +384,21 @@ class ArbitrageOpportunity:
 
 class KalshiClient:
     """
-    Kalshi API client supporting both authenticated and unauthenticated access.
+    Kalshi API client supporting authenticated and unauthenticated access.
 
-    Authenticated: higher rate limits, access to trading/portfolio endpoints.
-    Unauthenticated: market data only, lower rate limits.
+    Authenticated (higher rate limits + trading/portfolio access): Kalshi uses
+    RSA-PSS signed requests. You need:
+      - An API key ID string (from Kalshi dashboard)
+      - A private key PEM file (downloaded when you created the key pair)
+
+    Email/password is also supported as a fallback and gets a 24h JWT.
     """
 
     MAX_RETRIES = 4
     BASE_DELAY = 0.1  # seconds between paginated requests
 
-    def __init__(self, base_url=KALSHI_API_BASE, api_key_id=None, api_key=None,
-                 email=None, password=None):
+    def __init__(self, base_url=KALSHI_API_BASE, api_key_id=None,
+                 private_key_path=None, email=None, password=None):
         self.base_url = base_url
         self.session = HTTPClient()
         self.session.headers.update({
@@ -259,19 +407,23 @@ class KalshiClient:
             "User-Agent": "cadence-arbitrage-scanner/1.0",
         })
         self.authenticated = False
+        self.api_key_id = None
+        self.signer = None
 
-        # Prefer API key auth (RSA or HMAC key pair)
-        if api_key_id and api_key:
-            self._auth_api_key(api_key_id, api_key)
+        # Prefer RSA key auth (the standard Kalshi auth method)
+        if api_key_id and private_key_path:
+            self._auth_with_key(api_key_id, private_key_path)
         # Fall back to email/password login for JWT
         elif email and password:
             self._auth_login(email, password)
 
-    def _auth_api_key(self, api_key_id, api_key):
-        """Authenticate via API key (passed as bearer token)."""
-        self.session.headers["Authorization"] = f"Bearer {api_key_id}:{api_key}"
+    def _auth_with_key(self, api_key_id, private_key_path):
+        """Set up RSA-PSS request signing."""
+        self.api_key_id = api_key_id
+        self.signer = KalshiSigner(private_key_path)
         self.authenticated = True
-        print(f"  Authenticated via API key (key_id: {api_key_id[:8]}...)")
+        print(f"  Authenticated via API key {api_key_id[:8]}... "
+              f"(signer: {self.signer.backend})")
 
     def _auth_login(self, email, password):
         """Authenticate via email/password to obtain a JWT session token."""
@@ -290,10 +442,34 @@ class KalshiClient:
         member_id = data.get("member_id", "?")
         print(f"  Logged in successfully (member_id: {member_id})")
 
+    def _signing_headers(self, method, url):
+        """
+        Generate Kalshi-ACCESS-* headers for this request.
+
+        Timestamp is fresh each call (Kalshi rejects stale signatures).
+        Path is extracted from URL without query string.
+        """
+        parsed = urllib.parse.urlparse(url)
+        path = parsed.path  # no query string, per Kalshi spec
+        timestamp_ms = str(int(time.time() * 1000))
+        signature = self.signer.sign(timestamp_ms, method, path)
+        return {
+            "KALSHI-ACCESS-KEY": self.api_key_id,
+            "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
+            "KALSHI-ACCESS-SIGNATURE": signature,
+        }
+
     def _request(self, method, url, **kwargs):
         """Make a request with retry on 429 (rate limit) responses."""
         for attempt in range(self.MAX_RETRIES):
-            resp = self.session.request(method, url, **kwargs)
+            # Inject fresh signing headers per attempt (timestamp must be recent)
+            call_kwargs = dict(kwargs)
+            if self.signer:
+                extra = self._signing_headers(method, url)
+                existing = call_kwargs.get("headers") or {}
+                call_kwargs["headers"] = {**existing, **extra}
+
+            resp = self.session.request(method, url, **call_kwargs)
             if resp.status_code != 429:
                 resp.raise_for_status()
                 return resp.json()
@@ -305,8 +481,14 @@ class KalshiClient:
             print(f"  Rate limited (429). Retrying in {delay:.1f}s "
                   f"(attempt {attempt + 1}/{self.MAX_RETRIES})...")
             time.sleep(delay)
-        # Final attempt
-        resp = self.session.request(method, url, **kwargs)
+
+        # Final attempt after all retries
+        call_kwargs = dict(kwargs)
+        if self.signer:
+            extra = self._signing_headers(method, url)
+            existing = call_kwargs.get("headers") or {}
+            call_kwargs["headers"] = {**existing, **extra}
+        resp = self.session.request(method, url, **call_kwargs)
         resp.raise_for_status()
         return resp.json()
 
@@ -582,22 +764,22 @@ def build_client(args):
     """Build a KalshiClient from CLI args + environment variables."""
     # Priority: CLI args > env vars
     api_key_id = args.api_key_id or os.environ.get("KALSHI_API_KEY_ID")
-    api_key = args.api_key or os.environ.get("KALSHI_API_KEY")
+    private_key_path = args.private_key_path or os.environ.get("KALSHI_PRIVATE_KEY_PATH")
     email = args.email or os.environ.get("KALSHI_EMAIL")
     password = args.password or os.environ.get("KALSHI_PASSWORD")
 
     client = KalshiClient(
         base_url=KALSHI_API_BASE,
         api_key_id=api_key_id,
-        api_key=api_key,
+        private_key_path=private_key_path,
         email=email,
         password=password,
     )
 
     if not client.authenticated:
         print("  Running unauthenticated (lower rate limits).")
-        print("  Set KALSHI_API_KEY_ID + KALSHI_API_KEY env vars, or use")
-        print("  --api-key-id / --api-key flags for authenticated access.\n")
+        print("  Set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH in .env,")
+        print("  or use --api-key-id and --private-key-path flags.\n")
 
     return client
 
@@ -608,15 +790,15 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Authentication (pick one):
-  API key:        --api-key-id ID --api-key KEY
-                  or set KALSHI_API_KEY_ID / KALSHI_API_KEY env vars
+  RSA key:        --api-key-id ID --private-key-path /path/to/key.pem
+                  or set KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY_PATH env vars
   Email/password: --email E --password P
                   or set KALSHI_EMAIL / KALSHI_PASSWORD env vars
 
 Examples:
-  %(prog)s --demo                              # verify logic with sample data
-  %(prog)s --api-key-id myid --api-key mykey   # scan live, authenticated
-  %(prog)s --continuous --interval 15           # rescan every 15 seconds
+  %(prog)s --demo                                       # sample data
+  %(prog)s --api-key-id myid --private-key-path key.pem # scan live
+  %(prog)s --continuous --interval 15                   # rescan every 15s
         """,
     )
     parser.add_argument("--demo", action="store_true",
@@ -633,7 +815,8 @@ Examples:
     # Auth options
     auth = parser.add_argument_group("authentication")
     auth.add_argument("--api-key-id", help="Kalshi API key ID")
-    auth.add_argument("--api-key", help="Kalshi API key secret")
+    auth.add_argument("--private-key-path",
+                      help="Path to your Kalshi RSA private key PEM file")
     auth.add_argument("--email", help="Kalshi account email (for JWT login)")
     auth.add_argument("--password", help="Kalshi account password (for JWT login)")
 
