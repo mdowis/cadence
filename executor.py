@@ -28,12 +28,6 @@ import sys
 import time
 import uuid
 
-try:
-    import requests
-except ImportError:
-    print("Install requests: pip install requests")
-    sys.exit(1)
-
 
 def _load_dotenv(path=".env"):
     """Load .env into os.environ (env vars take priority)."""
@@ -56,6 +50,7 @@ _load_dotenv()
 
 from kalshi_arbitrage import (
     KalshiClient,
+    HTTPError,
     find_binary_arbitrage,
     find_multi_outcome_arbitrage,
     KALSHI_API_BASE,
@@ -251,7 +246,7 @@ def execute_opportunity(trader, risk_mgr, opp, contracts=1, dry_run=False):
         risk_mgr.record_trade_opened(opp, contracts)
         return True, f"Placed {filled_count}/{total_count} orders"
 
-    except requests.RequestException as e:
+    except HTTPError as e:
         return False, f"ORDER ERROR: {e}"
 
 
@@ -298,7 +293,7 @@ def run_executor(trader, risk_mgr, min_profit=1, contracts=1,
             # Fetch markets
             try:
                 markets = trader.get_all_markets()
-            except requests.RequestException as e:
+            except HTTPError as e:
                 print(f"  [{ts}] Fetch error: {e}")
                 time.sleep(interval)
                 continue

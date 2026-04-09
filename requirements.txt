@@ -1,1 +1,2 @@
-requests>=2.31.0
+# No external dependencies. Cadence uses Python stdlib only (urllib, json, http.server).
+# Requires Python 3.8+

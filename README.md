@@ -14,17 +14,16 @@ Kalshi contracts pay out $1.00 (100 cents) if an event occurs, $0.00 otherwise. 
 
 All profits are calculated net of Kalshi's quadratic taker fee: `ceil(0.07 x P x (1 - P))` per contract, where P is the price in dollars. Fees peak at 2c/contract at 50c and shrink toward the extremes.
 
-## Quick Start (3 steps)
+## Quick Start (2 steps)
+
+No `pip install` needed. Cadence uses only Python's standard library. Requires Python 3.8+.
 
 ```bash
-# 1. Install dependencies
-pip install requests
-
-# 2. Configure: copy the template and add your Kalshi API key
+# 1. Configure: copy the template and add your Kalshi API key
 cp .env.example .env
 # edit .env and fill in KALSHI_API_KEY_ID and KALSHI_API_KEY
 
-# 3. Run the dashboard
+# 2. Run the dashboard
 python dashboard.py
 ```
 
@@ -275,7 +274,7 @@ cadence/
   test_risk_manager.py    Risk management and balance sync tests
   .env.example            Configuration template
   .gitignore              Excludes .env, __pycache__, venvs, state files
-  requirements.txt        Python dependencies (requests)
+  requirements.txt        (empty - no external dependencies, stdlib only)
 ```
 
 ## Disclaimer

@@ -22,14 +22,11 @@ import math
 import os
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass, field
-
-try:
-    import requests
-except ImportError:
-    print("Install requests: pip install requests")
-    sys.exit(1)
 
 
 def _load_dotenv(path=".env"):
@@ -49,6 +46,108 @@ def _load_dotenv(path=".env"):
 
 
 _load_dotenv()
+
+
+# ---------------------------------------------------------------------------
+# Minimal HTTP client (stdlib only, no external dependencies)
+# ---------------------------------------------------------------------------
+
+class HTTPError(Exception):
+    """Raised for network failures and non-2xx HTTP responses."""
+    def __init__(self, message, status_code=None, headers=None, body=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.body = body
+
+
+class HTTPResponse:
+    """Response wrapper mimicking the small subset of requests we use."""
+    def __init__(self, status_code, headers, body):
+        self.status_code = status_code
+        self.headers = headers
+        self._body = body
+
+    def json(self):
+        if isinstance(self._body, bytes):
+            return json.loads(self._body.decode())
+        return json.loads(self._body)
+
+    @property
+    def text(self):
+        return self._body.decode() if isinstance(self._body, bytes) else self._body
+
+    def raise_for_status(self):
+        if not (200 <= self.status_code < 300):
+            snippet = ""
+            try:
+                snippet = self.text[:200]
+            except Exception:
+                pass
+            raise HTTPError(
+                f"HTTP {self.status_code}: {snippet}",
+                status_code=self.status_code,
+                headers=self.headers,
+                body=self._body,
+            )
+
+
+class HTTPClient:
+    """
+    Minimal urllib-based HTTP client.
+
+    Replaces `requests` so the project has zero external dependencies.
+    """
+
+    def __init__(self, timeout=30):
+        self.timeout = timeout
+        self.headers = {}
+
+    def request(self, method, url, params=None, json=None, headers=None, timeout=None):
+        # Append query params
+        if params:
+            # Filter out None values
+            clean = {k: v for k, v in params.items() if v is not None}
+            if clean:
+                sep = "&" if "?" in url else "?"
+                url = url + sep + urllib.parse.urlencode(clean)
+
+        # Merge headers (per-request overrides session headers)
+        merged = dict(self.headers)
+        if headers:
+            merged.update(headers)
+
+        # Encode JSON body if provided
+        data = None
+        if json is not None:
+            import json as _json
+            data = _json.dumps(json).encode("utf-8")
+            merged.setdefault("Content-Type", "application/json")
+
+        req = urllib.request.Request(url, data=data, headers=merged, method=method)
+
+        try:
+            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
+                body = resp.read()
+                return HTTPResponse(resp.status, dict(resp.headers), body)
+        except urllib.error.HTTPError as e:
+            # HTTPError is a response-like object for 4xx/5xx responses.
+            # Return it as a response so the caller can handle 429 etc.
+            try:
+                body = e.read()
+            except Exception:
+                body = b""
+            return HTTPResponse(e.code, dict(e.headers or {}), body)
+        except urllib.error.URLError as e:
+            raise HTTPError(f"Network error: {e.reason}") from e
+        except (TimeoutError, OSError) as e:
+            raise HTTPError(f"Request failed: {e}") from e
+
+    def get(self, url, **kwargs):
+        return self.request("GET", url, **kwargs)
+
+    def post(self, url, **kwargs):
+        return self.request("POST", url, **kwargs)
 
 
 KALSHI_API_BASE = "https://trading-api.kalshi.com/trade-api/v2"
@@ -153,7 +252,7 @@ class KalshiClient:
     def __init__(self, base_url=KALSHI_API_BASE, api_key_id=None, api_key=None,
                  email=None, password=None):
         self.base_url = base_url
-        self.session = requests.Session()
+        self.session = HTTPClient()
         self.session.headers.update({
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -559,7 +658,7 @@ Examples:
         print(f"\n[{ts}] Fetching open Kalshi markets ({auth_label})...")
         try:
             markets = client.get_all_markets()
-        except requests.RequestException as e:
+        except HTTPError as e:
             print(f"  ERROR fetching markets: {e}")
             return []
         print(f"  Fetched {len(markets)} markets.")
