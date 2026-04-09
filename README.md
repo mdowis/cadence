@@ -14,35 +14,52 @@ Kalshi contracts pay out $1.00 (100 cents) if an event occurs, $0.00 otherwise. 
 
 All profits are calculated net of Kalshi's quadratic taker fee: `ceil(0.07 x P x (1 - P))` per contract, where P is the price in dollars. Fees peak at 2c/contract at 50c and shrink toward the extremes.
 
-## Quick Start
+## Quick Start (3 steps)
 
 ```bash
-# Install
+# 1. Install dependencies
 pip install requests
 
-# Verify logic with built-in sample data
+# 2. Configure: copy the template and add your Kalshi API key
+cp .env.example .env
+# edit .env and fill in KALSHI_API_KEY_ID and KALSHI_API_KEY
+
+# 3. Run the dashboard
+python dashboard.py
+```
+
+Then open **http://localhost:8050** in your browser. The dashboard is the single entry point — click the **Start** button next to "Market Scanner" to begin scanning, then **Start** next to "Auto Executor" when you're ready to trade. The dry-run toggle lets you simulate trades without placing real orders.
+
+### CLI alternatives
+
+If you prefer running pieces from the command line:
+
+```bash
+# Verify detection logic with built-in sample data (no API key needed)
 python kalshi_arbitrage.py --demo
 
-# Scan live markets (unauthenticated, lower rate limits)
+# One-shot CLI scan
 python kalshi_arbitrage.py
 
-# Scan live with your API key (higher rate limits)
-python kalshi_arbitrage.py --api-key-id YOUR_ID --api-key YOUR_KEY
-
-# Launch the visual dashboard
-python dashboard.py
-# Then open http://localhost:8050
+# CLI executor in dry-run mode
+python executor.py --dry-run
 ```
+
+All scripts pick up configuration from `.env` automatically.
 
 ## Architecture
 
 ```
+dashboard.py           Single entry point: loads .env, starts web server
+dashboard.html         Interactive frontend with start/stop controls
+process_controller.py  Manages scanner and executor background threads
 kalshi_arbitrage.py    Scanner: finds opportunities, computes fees
 risk_manager.py        Risk engine: gates every trade through limits
-executor.py            Auto-trader: scanner + risk + Kalshi order API
-dashboard.py           Web server: serves dashboard + JSON API
-dashboard.html         Interactive frontend (single-file, no build step)
+executor.py            Order placement via Kalshi trading API
+.env.example           Configuration template (copy to .env)
 ```
+
+`dashboard.py` orchestrates everything. It loads `.env`, authenticates with Kalshi, initializes the risk manager, and starts a local web server. The dashboard controls the scanner and executor threads via HTTP endpoints - no separate processes to manage.
 
 ## Components
 
@@ -119,21 +136,22 @@ python executor.py \
 Interactive web dashboard served on `http://localhost:8050`. No build step, no npm, no external CDN. Just Python's stdlib HTTP server and vanilla JS with canvas rendering.
 
 ```bash
-# Demo mode (sample data)
 python dashboard.py
-
-# Live mode with API key
-python dashboard.py --live --api-key-id X --api-key K
-
-# Custom port, faster scans
-python dashboard.py --live --port 8080 --interval 10
 ```
+
+That's it. All configuration comes from `.env`.
+
+**Process control buttons** (top of dashboard):
+
+- **Market Scanner** Start/Stop -- Fetches Kalshi markets on an interval, runs arb detection, syncs your balance. Requires authentication.
+- **Auto Executor** Start/Stop -- Places orders on detected opportunities. Requires scanner to be running first. Toggle between DRY RUN (simulate) and LIVE modes with a confirmation prompt.
 
 **Dashboard panels:**
 
+- **Process control** -- Start/Stop buttons, status dots, uptime, trade counts
 - **Stats row** -- Markets scanned, arb count, near misses, color-coded cards
+- **Risk panel** -- Live equity, cash balance (LIVE/LOCAL indicator), daily P&L, exposure, drawdown progress bar, emergency kill switch button
 - **Opportunity cards** -- Expandable, with stacked cost/fee/profit bar, per-leg detail
-- **Risk panel** -- Equity, daily P&L, exposure, drawdown progress bar, kill switch button
 - **Spread heatmap** -- Every market as a colored cell (green = arb, yellow = near miss)
 - **Fee curve chart** -- Canvas-rendered Kalshi quadratic fee parabola (taker vs maker)
 - **Profit breakdown** -- Stacked bar chart comparing opportunities side by side
@@ -141,30 +159,63 @@ python dashboard.py --live --port 8080 --interval 10
 
 Auto-refreshes every 15 seconds.
 
-## Authentication
+## Configuration
 
-Two methods, in priority order. Both the scanner and executor accept them:
+All configuration lives in `.env`. Copy `.env.example` to get started:
 
-**API key (recommended):**
 ```bash
-# Via CLI flags
---api-key-id YOUR_KEY_ID --api-key YOUR_KEY_SECRET
-
-# Via environment variables
-export KALSHI_API_KEY_ID=your_key_id
-export KALSHI_API_KEY=your_key_secret
+cp .env.example .env
 ```
 
-**Email/password (gets a 24h JWT):**
-```bash
---email you@example.com --password yourpass
+### Authentication (required for trading)
 
-# Or via env vars
-export KALSHI_EMAIL=you@example.com
-export KALSHI_PASSWORD=yourpass
+```bash
+# Primary: API key (recommended)
+KALSHI_API_KEY_ID=your_key_id
+KALSHI_API_KEY=your_key_secret
+
+# Alternative: email/password (gets a 24h JWT)
+KALSHI_EMAIL=you@example.com
+KALSHI_PASSWORD=yourpass
 ```
 
-Unauthenticated access works for market data scanning but has lower rate limits and cannot place orders.
+Without credentials, the dashboard still runs in demo mode so you can explore the UI.
+
+### Risk limits (all in cents)
+
+```bash
+CADENCE_EQUITY=5000                    # Starting equity if balance sync off
+CADENCE_SYNC_BALANCE=true              # Pull real cash balance from Kalshi
+CADENCE_MAX_DRAWDOWN_PCT=10            # Kill switch at this % drawdown from peak
+CADENCE_DAILY_LOSS_LIMIT=2000          # Max loss per day ($20)
+CADENCE_MAX_PER_TRADE=500              # Max cost per arb trade ($5)
+CADENCE_MAX_EXPOSURE=10000             # Max total open exposure ($100)
+CADENCE_MAX_CONSECUTIVE_LOSSES=5       # Circuit breaker threshold
+CADENCE_MIN_PROFIT=2                   # Minimum net profit to trade
+```
+
+### Scanner / executor
+
+```bash
+CADENCE_INTERVAL=15                    # Seconds between scans
+CADENCE_CONTRACTS=1                    # Contracts per leg
+CADENCE_PORT=8050                      # Dashboard port
+CADENCE_STATE_FILE=risk_state.json     # Persist risk state across restarts
+```
+
+Environment variables set in your shell take priority over `.env`. Both beat the defaults.
+
+## Account Balance Tracking
+
+When `CADENCE_SYNC_BALANCE=true` (default), the scanner calls Kalshi's `/portfolio/balance` endpoint on every scan cycle and updates the risk manager with your real cash balance. The risk manager computes:
+
+```
+total_equity = cash_balance + open_position_cost_basis
+daily_pnl    = total_equity - daily_starting_balance
+drawdown_pct = (peak_equity - current_equity) / peak_equity * 100
+```
+
+The dashboard displays both **Equity** (synced total) and **Cash Balance** (from Kalshi directly). An indicator shows `LIVE` when the equity number is backed by a real balance sync, or `LOCAL` if it's a simulated starting value.
 
 ## Fee Model
 
@@ -191,8 +242,14 @@ When running `dashboard.py`, these JSON endpoints are available:
 | Method | Path | Description |
 |---|---|---|
 | GET | `/api/scan` | Latest scan results, opportunities, near misses |
-| GET | `/api/risk` | Current risk state, equity, drawdown, config |
+| GET | `/api/risk` | Risk state, equity, drawdown, balance sync info |
+| GET | `/api/processes` | Scanner & executor status, uptime, config |
 | GET | `/api/fee-curve` | Fee per contract at each price point (1-99c) |
+| POST | `/api/scanner/start` | Start the market scanner thread |
+| POST | `/api/scanner/stop` | Stop the market scanner thread |
+| POST | `/api/executor/start` | Start the auto-executor (body: `{dry_run, contracts}`) |
+| POST | `/api/executor/stop` | Stop the auto-executor |
+| POST | `/api/config` | Update runtime config (interval, min_profit, etc.) |
 | POST | `/api/risk/kill-switch/activate` | Halt all trading |
 | POST | `/api/risk/kill-switch/deactivate` | Resume trading |
 | POST | `/api/risk/reset-daily` | Reset daily P&L and trade counters |
@@ -201,22 +258,24 @@ When running `dashboard.py`, these JSON endpoints are available:
 
 ```bash
 python test_arbitrage.py       # 14 tests: fee model, detection, edge cases
-python test_risk_manager.py    # 18 tests: kill switch, drawdown, limits, lifecycle
+python test_risk_manager.py    # 23 tests: kill switch, drawdown, balance sync, limits, lifecycle
 ```
 
 ## Project Structure
 
 ```
 cadence/
-  kalshi_arbitrage.py     Core scanner + Kalshi API client + fee model
-  risk_manager.py         Risk config, state tracking, trade gating
-  executor.py             Auto-execution loop + Kalshi order API
-  dashboard.py            HTTP server for dashboard + JSON API
-  dashboard.html          Single-file interactive frontend
+  dashboard.py            Single entry point, web server, .env loader
+  dashboard.html          Interactive frontend with start/stop controls
+  process_controller.py   Scanner & executor thread management
+  kalshi_arbitrage.py     Scanner + Kalshi API client + fee model
+  risk_manager.py         Risk config, balance sync, trade gating
+  executor.py             Order placement via Kalshi trading API
   test_arbitrage.py       Scanner and fee model tests
-  test_risk_manager.py    Risk management tests
+  test_risk_manager.py    Risk management and balance sync tests
+  .env.example            Configuration template
+  .gitignore              Excludes .env, __pycache__, venvs, state files
   requirements.txt        Python dependencies (requests)
-  .gitignore              Excludes .env, __pycache__, venvs
 ```
 
 ## Disclaimer

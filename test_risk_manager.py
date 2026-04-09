@@ -198,6 +198,54 @@ def test_status_report():
     assert "config" in status
 
 
+# --- Balance Sync ---
+
+def test_balance_sync_initializes_equity():
+    """First balance sync sets starting equity when none was set."""
+    rm = RiskManager(starting_equity_cents=0)
+    rm.sync_actual_balance(7500)
+    assert rm.state.current_equity_cents == 7500
+    assert rm.state.starting_equity_cents == 7500
+    assert rm.state.peak_equity_cents == 7500
+    assert rm.state.last_synced_balance_cents == 7500
+    assert rm.state.balance_sync_count == 1
+
+
+def test_balance_sync_updates_peak():
+    rm = RiskManager(starting_equity_cents=5000)
+    rm.state.peak_equity_cents = 5000
+    rm.state.current_equity_cents = 5000
+    rm.sync_actual_balance(6000)  # balance up to 6000
+    assert rm.state.peak_equity_cents == 6000
+    rm.sync_actual_balance(5500)  # balance down
+    assert rm.state.peak_equity_cents == 6000  # peak preserved
+
+
+def test_balance_sync_triggers_drawdown_kill():
+    config = RiskConfig(max_drawdown_pct=10.0)
+    rm = RiskManager(config=config, starting_equity_cents=10000)
+    rm.state.peak_equity_cents = 10000
+    rm.sync_actual_balance(8900)  # 11% drawdown
+    assert rm.state.kill_switch_active
+
+
+def test_balance_sync_adds_exposure():
+    """Equity = cash + open position cost basis."""
+    rm = RiskManager(starting_equity_cents=10000)
+    rm.state.total_exposure_cents = 500  # $5 in open positions
+    rm.sync_actual_balance(9500)  # $95 cash
+    # Total equity = 9500 + 500 = 10000
+    assert rm.state.current_equity_cents == 10000
+
+
+def test_balance_sync_computes_daily_pnl():
+    rm = RiskManager(starting_equity_cents=10000)
+    rm.state.daily_starting_balance_cents = 10000
+    rm.state.daily_date = time.strftime("%Y-%m-%d")
+    rm.sync_actual_balance(10300)
+    assert rm.state.daily_pnl_cents == 300
+
+
 if __name__ == "__main__":
     test_kill_switch_blocks_trades()
     test_kill_switch_can_be_deactivated()
@@ -217,4 +265,9 @@ if __name__ == "__main__":
     test_min_profit_blocks()
     test_min_roi_blocks()
     test_status_report()
-    print("All 18 risk manager tests passed!")
+    test_balance_sync_initializes_equity()
+    test_balance_sync_updates_peak()
+    test_balance_sync_triggers_drawdown_kill()
+    test_balance_sync_adds_exposure()
+    test_balance_sync_computes_daily_pnl()
+    print("All 23 risk manager tests passed!")

@@ -494,6 +494,126 @@
   }
   .risk-event-type { color: var(--yellow); }
   .risk-event-time { color: var(--text-dim); }
+
+  /* ---- Process Control Panel ---- */
+  .process-panel { margin-bottom: 1.5rem; }
+
+  .process-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem;
+    background: var(--surface2);
+    border-radius: 8px;
+    margin-bottom: 0.5rem;
+    border: 1px solid var(--border);
+  }
+
+  .process-info { flex: 1; min-width: 0; }
+
+  .process-name {
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .status-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-dim);
+  }
+  .status-dot.running {
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    animation: pulse-dot 2s infinite;
+  }
+  .status-dot.stopping { background: var(--yellow); }
+  .status-dot.error { background: var(--red); }
+
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .process-detail {
+    font-size: 0.6rem;
+    color: var(--text-dim);
+    margin-top: 0.25rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .process-stats {
+    font-size: 0.6rem;
+    color: var(--text-dim);
+    margin-top: 0.15rem;
+  }
+
+  .process-btn {
+    font-family: inherit;
+    font-size: 0.65rem;
+    font-weight: 700;
+    padding: 0.4rem 0.9rem;
+    border-radius: 6px;
+    border: 1px solid;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    min-width: 60px;
+    transition: all 0.2s;
+  }
+  .process-btn.start {
+    border-color: var(--green);
+    background: rgba(34,197,94,0.1);
+    color: var(--green);
+  }
+  .process-btn.start:hover:not(:disabled) { background: var(--green); color: #000; }
+  .process-btn.stop {
+    border-color: var(--red);
+    background: rgba(239,68,68,0.1);
+    color: var(--red);
+  }
+  .process-btn.stop:hover:not(:disabled) { background: var(--red); color: #fff; }
+  .process-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .mode-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.65rem;
+    color: var(--text-dim);
+    margin-left: 0.5rem;
+  }
+  .mode-toggle input { cursor: pointer; }
+
+  .auth-warning {
+    background: rgba(239,68,68,0.1);
+    border: 1px solid var(--red);
+    color: var(--red);
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.65rem;
+    margin-bottom: 0.75rem;
+    text-align: center;
+  }
+
+  .live-mode-warning {
+    background: rgba(234,179,8,0.1);
+    border: 1px solid var(--yellow);
+    color: var(--yellow);
+    padding: 0.4rem 0.6rem;
+    border-radius: 4px;
+    font-size: 0.6rem;
+    margin-top: 0.5rem;
+    text-align: center;
+  }
 </style>
 </head>
 <body>
@@ -515,8 +635,55 @@
 
 <!-- Main -->
 <div class="main-grid">
-  <!-- Left: Opportunities -->
+  <!-- Left: Process Controls + Opportunities -->
   <div style="display:flex; flex-direction:column; gap:1.5rem;">
+    <!-- Process Control Panel -->
+    <div class="panel process-panel">
+      <div class="panel-header">
+        <span class="panel-title">Process Control</span>
+        <span id="authStatus" style="font-size:0.6rem; color:var(--text-dim)">—</span>
+      </div>
+      <div class="panel-body">
+        <div id="authWarning" class="auth-warning" style="display:none">
+          NO API KEY DETECTED. Add KALSHI_API_KEY_ID and KALSHI_API_KEY to your .env file to enable live trading.
+        </div>
+
+        <!-- Scanner row -->
+        <div class="process-row">
+          <div class="process-info">
+            <div class="process-name">
+              <span class="status-dot" id="scannerDot"></span>
+              <span>Market Scanner</span>
+            </div>
+            <div class="process-detail" id="scannerDetail">Not started</div>
+            <div class="process-stats" id="scannerStats"></div>
+          </div>
+          <button class="process-btn start" id="scannerBtn" onclick="toggleScanner()">Start</button>
+        </div>
+
+        <!-- Executor row -->
+        <div class="process-row">
+          <div class="process-info">
+            <div class="process-name">
+              <span class="status-dot" id="executorDot"></span>
+              <span>Auto Executor</span>
+              <label class="mode-toggle">
+                <input type="checkbox" id="dryRunToggle" checked onchange="updateDryRun()">
+                <span id="dryRunLabel">DRY RUN</span>
+              </label>
+            </div>
+            <div class="process-detail" id="executorDetail">Not started</div>
+            <div class="process-stats" id="executorStats"></div>
+          </div>
+          <button class="process-btn start" id="executorBtn" onclick="toggleExecutor()">Start</button>
+        </div>
+
+        <div id="liveModeWarning" class="live-mode-warning" style="display:none">
+          LIVE MODE: Real money trades will be placed. Monitor actively.
+        </div>
+      </div>
+    </div>
+
     <div class="panel">
       <div class="panel-header">
         <span class="panel-title">Arbitrage Opportunities</span>
@@ -601,6 +768,7 @@
 // ---- State ----
 let data = null;
 let riskData = null;
+let processData = null;
 let currentFilter = 'all';
 let autoRefreshInterval = null;
 
@@ -609,17 +777,68 @@ async function fetchData() {
   const btn = document.getElementById('refreshBtn');
   btn.textContent = '...';
   try {
-    const [scanResp, riskResp] = await Promise.all([
+    const [scanResp, riskResp, procResp] = await Promise.all([
       fetch('/api/scan'),
       fetch('/api/risk'),
+      fetch('/api/processes'),
     ]);
     data = await scanResp.json();
     riskData = await riskResp.json();
+    processData = await procResp.json();
     render();
   } catch (e) {
     console.error('Fetch error:', e);
   }
   btn.textContent = 'Refresh';
+}
+
+// ---- Process Control ----
+async function postJson(url, body) {
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body || {}),
+  });
+  return resp.json();
+}
+
+async function toggleScanner() {
+  if (!processData) return;
+  const running = processData.scanner.status === 'running' ||
+                  processData.scanner.status === 'starting';
+  const result = await postJson(running ? '/api/scanner/stop' : '/api/scanner/start');
+  if (!result.success && result.message) {
+    alert(result.message);
+  }
+  fetchData();
+}
+
+async function toggleExecutor() {
+  if (!processData) return;
+  const running = processData.executor.status === 'running' ||
+                  processData.executor.status === 'starting';
+  if (running) {
+    await postJson('/api/executor/stop');
+  } else {
+    const dryRun = document.getElementById('dryRunToggle').checked;
+    if (!dryRun && !confirm('LIVE MODE: Real money trades will be placed. Continue?')) {
+      return;
+    }
+    const result = await postJson('/api/executor/start', {dry_run: dryRun});
+    if (!result.success && result.message) {
+      alert(result.message);
+    }
+  }
+  fetchData();
+}
+
+async function updateDryRun() {
+  const dryRun = document.getElementById('dryRunToggle').checked;
+  document.getElementById('dryRunLabel').textContent = dryRun ? 'DRY RUN' : 'LIVE';
+  document.getElementById('liveModeWarning').style.display = dryRun ? 'none' : 'block';
+  if (processData) {
+    await postJson('/api/config', {dry_run: dryRun});
+  }
 }
 
 async function killSwitch(activate) {
@@ -644,6 +863,7 @@ function render() {
   renderFeeCurve();
   renderProfitChart();
   if (riskData) renderRisk();
+  if (processData) renderProcesses();
 }
 
 function renderHeader() {
@@ -1014,15 +1234,22 @@ function renderRisk() {
 
   // Metrics grid
   const equityDollars = (r.equity_cents / 100).toFixed(2);
+  const cashDollars = (r.cash_balance_cents / 100).toFixed(2);
   const dailyPnl = r.daily_pnl_cents;
   const dailyColor = dailyPnl >= 0 ? 'var(--green)' : 'var(--red)';
   const dailySign = dailyPnl >= 0 ? '+' : '';
   const exposureDollars = (r.total_exposure_cents / 100).toFixed(2);
+  const syncedLabel = r.balance_sync_count > 0 ? 'LIVE' : 'LOCAL';
+  const syncedColor = r.balance_sync_count > 0 ? 'var(--green)' : 'var(--text-dim)';
 
   document.getElementById('riskGrid').innerHTML = `
     <div class="risk-metric">
       <div class="risk-metric-val" style="color:var(--cyan)">$${equityDollars}</div>
-      <div class="risk-metric-lbl">Equity</div>
+      <div class="risk-metric-lbl">Equity <span style="color:${syncedColor}">${syncedLabel}</span></div>
+    </div>
+    <div class="risk-metric">
+      <div class="risk-metric-val" style="color:var(--cyan)">$${cashDollars}</div>
+      <div class="risk-metric-lbl">Cash Balance</div>
     </div>
     <div class="risk-metric">
       <div class="risk-metric-val" style="color:${dailyColor}">${dailySign}${dailyPnl}c</div>
@@ -1035,10 +1262,6 @@ function renderRisk() {
     <div class="risk-metric">
       <div class="risk-metric-val">${r.open_position_count}</div>
       <div class="risk-metric-lbl">Open Positions</div>
-    </div>
-    <div class="risk-metric">
-      <div class="risk-metric-val">${r.daily_trade_count}</div>
-      <div class="risk-metric-lbl">Trades Today</div>
     </div>
     <div class="risk-metric">
       <div class="risk-metric-val" style="color:${r.consecutive_losses >= 3 ? 'var(--red)' : 'var(--text)'}">${r.consecutive_losses}</div>
@@ -1083,6 +1306,80 @@ function renderRisk() {
       </div>
     `).join('');
   }
+}
+
+// ---- Process Control Panel ----
+function renderProcesses() {
+  const p = processData;
+  if (p.error) return;
+
+  const authed = p.authenticated;
+  document.getElementById('authStatus').textContent = authed ? 'AUTHENTICATED' : 'NO AUTH';
+  document.getElementById('authStatus').style.color = authed ? 'var(--green)' : 'var(--red)';
+  document.getElementById('authWarning').style.display = authed ? 'none' : 'block';
+
+  // Scanner
+  const s = p.scanner;
+  const sDot = document.getElementById('scannerDot');
+  const sBtn = document.getElementById('scannerBtn');
+  const sDetail = document.getElementById('scannerDetail');
+  const sStats = document.getElementById('scannerStats');
+
+  sDot.className = 'status-dot ' + (s.status === 'running' ? 'running' :
+                                     s.status === 'stopping' ? 'stopping' :
+                                     s.last_error ? 'error' : '');
+  sDetail.textContent = s.last_detail || 'Not started';
+
+  if (s.status === 'running' || s.status === 'starting') {
+    sBtn.textContent = 'Stop';
+    sBtn.className = 'process-btn stop';
+    const uptime = formatUptime(s.uptime_seconds);
+    sStats.textContent = `Runs: ${s.run_count} | Uptime: ${uptime}`;
+  } else {
+    sBtn.textContent = 'Start';
+    sBtn.className = 'process-btn start';
+    sStats.textContent = s.run_count > 0 ? `Last: ${s.run_count} runs` : '';
+  }
+  sBtn.disabled = !authed;
+
+  // Executor
+  const e = p.executor;
+  const eDot = document.getElementById('executorDot');
+  const eBtn = document.getElementById('executorBtn');
+  const eDetail = document.getElementById('executorDetail');
+  const eStats = document.getElementById('executorStats');
+
+  eDot.className = 'status-dot ' + (e.status === 'running' ? 'running' :
+                                     e.status === 'stopping' ? 'stopping' :
+                                     e.last_error ? 'error' : '');
+  eDetail.textContent = e.last_detail || 'Not started';
+
+  if (e.status === 'running' || e.status === 'starting') {
+    eBtn.textContent = 'Stop';
+    eBtn.className = 'process-btn stop';
+    const uptime = formatUptime(e.uptime_seconds);
+    eStats.textContent = `Trades: ${e.trades_placed} | Uptime: ${uptime}`;
+  } else {
+    eBtn.textContent = 'Start';
+    eBtn.className = 'process-btn start';
+    eStats.textContent = e.trades_placed > 0 ? `Placed ${e.trades_placed} trades` : '';
+  }
+  eBtn.disabled = !authed;
+
+  // Sync dry run toggle with server state
+  document.getElementById('dryRunToggle').checked = p.config.dry_run;
+  document.getElementById('dryRunLabel').textContent = p.config.dry_run ? 'DRY RUN' : 'LIVE';
+  document.getElementById('liveModeWarning').style.display = p.config.dry_run ? 'none' : 'block';
+}
+
+function formatUptime(seconds) {
+  if (!seconds) return '0s';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
 }
 
 // ---- Filters ----

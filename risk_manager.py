@@ -85,8 +85,14 @@ class RiskState:
     peak_equity_cents: int = 0
     current_equity_cents: int = 0
 
+    # Real balance tracking (synced from Kalshi /portfolio/balance)
+    last_synced_balance_cents: int = 0
+    last_balance_sync_time: float = 0.0
+    balance_sync_count: int = 0
+
     # Daily tracking (reset each calendar day)
     daily_date: str = ""
+    daily_starting_balance_cents: int = 0  # Balance at start of today
     daily_pnl_cents: float = 0.0
     daily_trade_count: int = 0
 
@@ -330,6 +336,57 @@ class RiskManager:
             self._persist()
 
     # ------------------------------------------------------------------
+    # Balance sync (from Kalshi /portfolio/balance)
+    # ------------------------------------------------------------------
+
+    def sync_actual_balance(self, balance_cents):
+        """
+        Sync current equity from the exchange (source of truth for cash).
+
+        Call this periodically with Kalshi's cash balance. Total equity is
+        cash + cost basis of open positions, because open positions are
+        deferred P&L until they resolve.
+
+        On first call, initializes starting and peak equity.
+        On subsequent calls, reconciles daily P&L and checks drawdown.
+        """
+        with self._lock:
+            self._maybe_reset_daily_internal()
+
+            # Total equity = cash balance + value locked in open positions
+            total_equity = balance_cents + int(self.state.total_exposure_cents)
+
+            # First-time initialization: treat current balance as baseline
+            if self.state.starting_equity_cents == 0:
+                self.state.starting_equity_cents = total_equity
+                self.state.peak_equity_cents = total_equity
+                self.state.daily_starting_balance_cents = total_equity
+                self.state.current_equity_cents = total_equity
+                self._log_risk_event(
+                    "balance_initialized",
+                    f"Starting equity set from Kalshi balance: {total_equity}c"
+                )
+            else:
+                self.state.current_equity_cents = total_equity
+
+                # Update peak
+                if total_equity > self.state.peak_equity_cents:
+                    self.state.peak_equity_cents = total_equity
+
+                # Daily P&L relative to today's opening balance
+                if self.state.daily_starting_balance_cents > 0:
+                    self.state.daily_pnl_cents = \
+                        total_equity - self.state.daily_starting_balance_cents
+
+            self.state.last_synced_balance_cents = balance_cents
+            self.state.last_balance_sync_time = time.time()
+            self.state.balance_sync_count += 1
+
+            # Check drawdown after sync - may trigger kill switch
+            self._check_drawdown()
+            self._persist()
+
+    # ------------------------------------------------------------------
     # Kill switch controls
     # ------------------------------------------------------------------
 
@@ -375,6 +432,10 @@ class RiskManager:
                 "equity_cents": equity,
                 "peak_equity_cents": peak,
                 "starting_equity_cents": self.state.starting_equity_cents,
+                "cash_balance_cents": self.state.last_synced_balance_cents,
+                "last_balance_sync_time": self.state.last_balance_sync_time,
+                "balance_sync_count": self.state.balance_sync_count,
+                "daily_starting_balance_cents": self.state.daily_starting_balance_cents,
                 "drawdown_cents": drawdown_cents,
                 "drawdown_pct": round(drawdown_pct, 2),
                 "daily_pnl_cents": self.state.daily_pnl_cents,
@@ -432,11 +493,17 @@ class RiskManager:
 
     def _maybe_reset_daily(self):
         """Auto-reset daily counters at midnight."""
+        self._maybe_reset_daily_internal()
+
+    def _maybe_reset_daily_internal(self):
+        """Auto-reset daily counters at midnight (no lock - caller must hold)."""
         today = time.strftime("%Y-%m-%d")
         if self.state.daily_date != today:
             self.state.daily_date = today
             self.state.daily_pnl_cents = 0.0
             self.state.daily_trade_count = 0
+            # Capture today's starting balance for accurate daily P&L
+            self.state.daily_starting_balance_cents = self.state.current_equity_cents
 
     def _log_risk_event(self, event_type, detail):
         self.state.risk_events.append({
@@ -455,6 +522,10 @@ class RiskManager:
                 "starting_equity_cents": self.state.starting_equity_cents,
                 "peak_equity_cents": self.state.peak_equity_cents,
                 "current_equity_cents": self.state.current_equity_cents,
+                "last_synced_balance_cents": self.state.last_synced_balance_cents,
+                "last_balance_sync_time": self.state.last_balance_sync_time,
+                "balance_sync_count": self.state.balance_sync_count,
+                "daily_starting_balance_cents": self.state.daily_starting_balance_cents,
                 "daily_date": self.state.daily_date,
                 "daily_pnl_cents": self.state.daily_pnl_cents,
                 "daily_trade_count": self.state.daily_trade_count,
@@ -480,6 +551,10 @@ class RiskManager:
             self.state.starting_equity_cents = data.get("starting_equity_cents", 0)
             self.state.peak_equity_cents = data.get("peak_equity_cents", 0)
             self.state.current_equity_cents = data.get("current_equity_cents", 0)
+            self.state.last_synced_balance_cents = data.get("last_synced_balance_cents", 0)
+            self.state.last_balance_sync_time = data.get("last_balance_sync_time", 0)
+            self.state.balance_sync_count = data.get("balance_sync_count", 0)
+            self.state.daily_starting_balance_cents = data.get("daily_starting_balance_cents", 0)
             self.state.daily_date = data.get("daily_date", "")
             self.state.daily_pnl_cents = data.get("daily_pnl_cents", 0)
             self.state.daily_trade_count = data.get("daily_trade_count", 0)

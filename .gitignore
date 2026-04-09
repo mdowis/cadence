@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+risk_state.json
+*.state.json

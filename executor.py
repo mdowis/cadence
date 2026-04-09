@@ -34,6 +34,26 @@ except ImportError:
     print("Install requests: pip install requests")
     sys.exit(1)
 
+
+def _load_dotenv(path=".env"):
+    """Load .env into os.environ (env vars take priority)."""
+    if not os.path.exists(path):
+        return
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key and val and key not in os.environ:
+                os.environ[key] = val
+
+
+_load_dotenv()
+
+
 from kalshi_arbitrage import (
     KalshiClient,
     find_binary_arbitrage,
