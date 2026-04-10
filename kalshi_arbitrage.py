@@ -30,22 +30,38 @@ from dataclasses import dataclass, field
 
 
 def _load_dotenv(path=".env"):
-    """Load .env into os.environ (env vars take priority)."""
-    if not os.path.exists(path):
-        return
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, val = line.partition("=")
-            key = key.strip()
-            val = val.strip().strip('"').strip("'")
-            if key and val and key not in os.environ:
-                os.environ[key] = val
+    """
+    Load .env into os.environ (env vars take priority).
+
+    Looks for .env in:
+      1. The current working directory
+      2. The directory of this source file (so `python /abs/path/dashboard.py`
+         from anywhere still picks up the .env next to the script)
+
+    Returns the path loaded, or None.
+    """
+    candidates = [path]
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates.append(os.path.join(script_dir, ".env"))
+
+    for candidate in candidates:
+        if not os.path.exists(candidate):
+            continue
+        with open(candidate) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and val and key not in os.environ:
+                    os.environ[key] = val
+        return os.path.abspath(candidate)
+    return None
 
 
-_load_dotenv()
+_DOTENV_LOADED_FROM = _load_dotenv()
 
 
 # ---------------------------------------------------------------------------
@@ -500,26 +516,38 @@ class KalshiClient:
             params["event_ticker"] = event_ticker
         return self._request("GET", f"{self.base_url}/markets", params=params)
 
+    MAX_PAGES = 50  # Safety cap: 50 pages x 1000 = 50,000 markets
+
     def get_all_markets(self, status="open"):
         """
         Page through all markets matching `status`.
 
-        Uses Kalshi's max page size (1000) for efficiency.
+        Uses Kalshi's max page size (1000) and stops after MAX_PAGES
+        pages as a safety guard against API-level infinite loops.
         """
         all_markets = []
         cursor = None
-        page = 0
-        while True:
+        seen_cursors = set()
+        for page in range(self.MAX_PAGES):
             data = self.get_markets(limit=1000, cursor=cursor, status=status)
             markets = data.get("markets", [])
             if not markets:
                 break
             all_markets.extend(markets)
-            page += 1
-            cursor = data.get("cursor")
-            if not cursor:
+            next_cursor = data.get("cursor")
+            if not next_cursor:
                 break
+            # Guard against loops if API returns the same cursor
+            if next_cursor in seen_cursors:
+                print(f"  [scanner] WARNING: repeated cursor {next_cursor!r}, "
+                      f"stopping pagination at page {page}", flush=True)
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
             time.sleep(self.BASE_DELAY)
+        else:
+            print(f"  [scanner] WARNING: hit MAX_PAGES={self.MAX_PAGES} "
+                  f"safety limit", flush=True)
         return all_markets
 
     def get_event(self, event_ticker):

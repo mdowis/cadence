@@ -32,19 +32,26 @@ import uuid
 
 
 def _load_dotenv(path=".env"):
-    """Load .env into os.environ (env vars take priority)."""
-    if not os.path.exists(path):
+    """Load .env into os.environ (env vars take priority). Checks CWD then script dir."""
+    candidates = [path]
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates.append(os.path.join(script_dir, ".env"))
+
+    for candidate in candidates:
+        if not os.path.exists(candidate):
+            continue
+        with open(candidate) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and val and key not in os.environ:
+                    os.environ[key] = val
         return
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, val = line.partition("=")
-            key = key.strip()
-            val = val.strip().strip('"').strip("'")
-            if key and val and key not in os.environ:
-                os.environ[key] = val
+    return
 
 
 _load_dotenv()

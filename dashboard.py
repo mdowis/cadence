@@ -34,28 +34,34 @@ def load_dotenv(path=".env"):
     """
     Load a simple KEY=VALUE .env file into os.environ.
 
+    Checks:
+      1. Current working directory
+      2. The directory of this script
     Existing environment variables take priority (env beats file).
-    Lines starting with # are comments. Values can be quoted.
     """
-    if not os.path.exists(path):
-        return False
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" not in line:
-                continue
-            key, _, val = line.partition("=")
-            key = key.strip()
-            val = val.strip().strip('"').strip("'")
-            if key and val and key not in os.environ:
-                os.environ[key] = val
-    return True
+    candidates = [path]
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates.append(os.path.join(script_dir, ".env"))
+
+    for candidate in candidates:
+        if not os.path.exists(candidate):
+            continue
+        with open(candidate) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and val and key not in os.environ:
+                    os.environ[key] = val
+        return os.path.abspath(candidate)
+    return None
 
 
 # Load .env BEFORE importing modules that may read env vars
-load_dotenv()
+_DOTENV_PATH = load_dotenv()
 
 
 from kalshi_arbitrage import (
@@ -227,6 +233,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json(_process_ctrl.get_status())
             else:
                 self._json({"error": "Process controller not initialized"})
+        elif self.path == "/api/diagnostics":
+            self._json(build_diagnostics())
         elif self.path == "/api/fee-curve":
             curve = []
             for p in range(1, 100):
@@ -310,6 +318,33 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             _process_ctrl.update_config(**body)
             self._json({"success": True, "config": _process_ctrl.get_status()["config"]})
 
+        # Test fetch: synchronously tries one Kalshi API call and returns the result
+        elif self.path == "/api/test-fetch":
+            if not _trader:
+                self._json({"success": False, "error": "Trader not initialized"}, 400)
+                return
+            result = {"authenticated": _trader.authenticated}
+            try:
+                import time as _t
+                t0 = _t.time()
+                data = _trader.get_markets(limit=5, status="open")
+                elapsed = _t.time() - t0
+                markets = data.get("markets", [])
+                result.update({
+                    "success": True,
+                    "elapsed_seconds": round(elapsed, 2),
+                    "markets_returned": len(markets),
+                    "first_market": markets[0] if markets else None,
+                    "cursor": data.get("cursor", ""),
+                })
+            except Exception as e:
+                result.update({
+                    "success": False,
+                    "error_type": type(e).__name__,
+                    "error": str(e),
+                })
+            self._json(result)
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -366,6 +401,50 @@ def build_risk_config():
     )
 
 
+def build_diagnostics():
+    """Return a full snapshot of system state for the dashboard."""
+    api_key_id = os.environ.get("KALSHI_API_KEY_ID", "")
+    private_key_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH", "")
+    email = os.environ.get("KALSHI_EMAIL", "")
+
+    diag = {
+        "dotenv_path": _DOTENV_PATH,
+        "cwd": os.getcwd(),
+        "script_dir": os.path.dirname(os.path.abspath(__file__)),
+        "credentials": {
+            "KALSHI_API_KEY_ID": (
+                f"{api_key_id[:6]}..." if api_key_id else "(not set)"
+            ),
+            "KALSHI_PRIVATE_KEY_PATH": private_key_path or "(not set)",
+            "KALSHI_PRIVATE_KEY_PATH_EXISTS": (
+                os.path.exists(private_key_path) if private_key_path else False
+            ),
+            "KALSHI_EMAIL": email or "(not set)",
+            "KALSHI_PASSWORD_SET": bool(os.environ.get("KALSHI_PASSWORD")),
+        },
+        "trader": {
+            "initialized": _trader is not None,
+            "authenticated": bool(_trader and _trader.authenticated),
+            "api_key_id": getattr(_trader, "api_key_id", None),
+            "signer_backend": (
+                _trader.signer.backend
+                if _trader and getattr(_trader, "signer", None) else None
+            ),
+            "base_url": getattr(_trader, "base_url", None),
+        },
+        "scanner": (
+            _process_ctrl.scanner_status.to_dict() if _process_ctrl else None
+        ),
+        "executor": (
+            _process_ctrl.executor_status.to_dict() if _process_ctrl else None
+        ),
+        "latest_scan_mode": _latest_scan.get("mode"),
+        "latest_scan_markets": len(_latest_scan.get("markets", [])),
+        "latest_scan_timestamp": _latest_scan.get("timestamp"),
+    }
+    return diag
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -405,6 +484,16 @@ Then open http://localhost:8050
     print("  CADENCE - Kalshi Arbitrage Dashboard")
     print("=" * 60)
 
+    # 0. Diagnostic: where did we load config from?
+    if _DOTENV_PATH:
+        print(f"  .env loaded from: {_DOTENV_PATH}")
+    else:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        print(f"  .env NOT FOUND. Checked:")
+        print(f"     - {os.path.abspath('.env')} (current directory)")
+        print(f"     - {os.path.join(script_dir, '.env')} (script directory)")
+        print(f"  Create one from .env.example and add your Kalshi API key.")
+
     # 1. Load risk config from env
     risk_config = build_risk_config()
     starting_equity = env_int("CADENCE_EQUITY", 5000)
@@ -422,6 +511,18 @@ Then open http://localhost:8050
     private_key_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH")
     email = os.environ.get("KALSHI_EMAIL")
     password = os.environ.get("KALSHI_PASSWORD")
+
+    # Print credential diagnostics (masked)
+    print()
+    print(f"  KALSHI_API_KEY_ID:       "
+          f"{'set (' + api_key_id[:6] + '...)' if api_key_id else 'NOT SET'}")
+    print(f"  KALSHI_PRIVATE_KEY_PATH: "
+          f"{private_key_path if private_key_path else 'NOT SET'}")
+    if private_key_path:
+        exists = os.path.exists(private_key_path)
+        print(f"     File exists:          {'yes' if exists else 'NO - check the path'}")
+    if email:
+        print(f"  KALSHI_EMAIL:            {email}")
 
     try:
         _trader = KalshiTrader(
