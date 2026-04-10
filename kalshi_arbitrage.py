@@ -520,7 +520,7 @@ class KalshiClient:
     BASE_DELAY = 0.02      # Seconds between paginated requests (reduced for speed)
     PROGRESS_EVERY = 10    # Log a progress line every N pages
 
-    def get_all_markets(self, status="open", max_markets=None):
+    def get_all_markets(self, status="open", max_markets=None, page_callback=None):
         """
         Page through all markets matching `status`.
 
@@ -531,6 +531,9 @@ class KalshiClient:
             status: Kalshi status filter ("open", "closed", etc.)
             max_markets: Optional soft cap. Stop once we've collected this
                 many unique markets even if more pages exist.
+            page_callback: Optional function(markets_so_far, page_num) called
+                after each page. Lets the caller show progressive updates
+                (e.g. render partial results on the dashboard).
 
         Returns:
             List of unique market dicts.
@@ -554,6 +557,13 @@ class KalshiClient:
                     seen_tickers.add(ticker)
                     all_markets.append(m)
                     new_count += 1
+
+            # Progressive update: let the caller show partial results
+            if page_callback:
+                try:
+                    page_callback(all_markets, page + 1)
+                except Exception as e:
+                    print(f"  [scanner] page_callback error: {e}", flush=True)
 
             # Progress log (periodic, not every page)
             if (page + 1) % self.PROGRESS_EVERY == 0:

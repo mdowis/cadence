@@ -119,7 +119,27 @@ class ProcessController:
                 cap_str = f" (cap {self.max_markets})" if self.max_markets else ""
                 print(f"  [scanner] Fetching open markets from Kalshi{cap_str}...", flush=True)
                 self.scanner_status.last_detail = "Fetching markets..."
-                markets = self.trader.get_all_markets(max_markets=self.max_markets)
+
+                # Progressive updates: run scan_callback after each page so
+                # the dashboard flips from demo data to live data within ~1s,
+                # then updates continuously as more pages come in.
+                def on_page(markets_so_far, page_num):
+                    try:
+                        opps = self.scan_callback(markets_so_far)
+                        with self._opportunities_lock:
+                            self._latest_opportunities = opps
+                        self.scanner_status.last_detail = (
+                            f"Scanning... page {page_num}, "
+                            f"{len(markets_so_far)} markets, {len(opps)} opps"
+                        )
+                        self.scanner_status.last_run_at = time.time()
+                    except Exception as e:
+                        print(f"  [scanner] progressive scan failed: {e}", flush=True)
+
+                markets = self.trader.get_all_markets(
+                    max_markets=self.max_markets,
+                    page_callback=on_page,
+                )
                 print(f"  [scanner] Got {len(markets)} markets in "
                       f"{time.time()-t_start:.1f}s", flush=True)
 
@@ -129,7 +149,7 @@ class ProcessController:
                     self.scanner_status.last_detail = "Got 0 markets (auth issue?)"
                     print(f"  [scanner] WARNING: 0 markets returned", flush=True)
                 else:
-                    # Run arb detection (also updates latest scan shared state)
+                    # Final scan with complete market set
                     opps = self.scan_callback(markets)
 
                     with self._opportunities_lock:
