@@ -108,40 +108,54 @@ class ProcessController:
 
     def _scanner_loop(self):
         self.scanner_status.status = "running"
-        self.scanner_status.last_detail = "Started"
+        self.scanner_status.last_detail = "Starting..."
+        print(f"  [scanner] Thread started", flush=True)
 
         while not self._scanner_stop.is_set():
+            t_start = time.time()
             try:
                 # Fetch markets
+                print(f"  [scanner] Fetching open markets from Kalshi...", flush=True)
+                self.scanner_status.last_detail = "Fetching markets..."
                 markets = self.trader.get_all_markets()
+                print(f"  [scanner] Got {len(markets)} markets in "
+                      f"{time.time()-t_start:.1f}s", flush=True)
 
-                # Run arb detection (also updates latest scan shared state)
-                opps = self.scan_callback(markets)
+                if len(markets) == 0:
+                    self.scanner_status.last_error = \
+                        "Kalshi returned 0 markets. Check your API credentials."
+                    self.scanner_status.last_detail = "Got 0 markets (auth issue?)"
+                    print(f"  [scanner] WARNING: 0 markets returned", flush=True)
+                else:
+                    # Run arb detection (also updates latest scan shared state)
+                    opps = self.scan_callback(markets)
 
-                with self._opportunities_lock:
-                    self._latest_opportunities = opps
+                    with self._opportunities_lock:
+                        self._latest_opportunities = opps
+
+                    self.scanner_status.run_count += 1
+                    self.scanner_status.last_run_at = time.time()
+                    self.scanner_status.last_error = ""
+                    self.scanner_status.last_detail = (
+                        f"Scanned {len(markets)} markets, "
+                        f"{len(opps)} opportunities ({time.time()-t_start:.1f}s)"
+                    )
+                    print(f"  [scanner] {self.scanner_status.last_detail}", flush=True)
 
                 # Sync balance from Kalshi (source of truth)
                 try:
                     balance_resp = self.trader.get_balance()
-                    # Kalshi returns {"balance": N} in cents
                     balance = balance_resp.get("balance", 0)
                     if balance:
                         self.risk_mgr.sync_actual_balance(balance)
                 except Exception as e:
                     # Balance sync is non-fatal — don't kill the scanner
-                    self.scanner_status.last_detail = f"Balance sync failed: {e}"
-
-                self.scanner_status.run_count += 1
-                self.scanner_status.last_run_at = time.time()
-                self.scanner_status.last_error = ""
-                self.scanner_status.last_detail = \
-                    f"Scanned {len(markets)} markets, {len(opps)} opportunities"
+                    print(f"  [scanner] Balance sync failed: {e}", flush=True)
 
             except Exception as e:
-                self.scanner_status.last_error = str(e)
-                self.scanner_status.last_detail = f"Error: {e}"
-                print(f"  Scanner error: {e}")
+                self.scanner_status.last_error = f"{type(e).__name__}: {e}"
+                self.scanner_status.last_detail = f"ERROR: {e}"
+                print(f"  [scanner] ERROR: {type(e).__name__}: {e}", flush=True)
                 traceback.print_exc()
 
             # Sleep, but wake up on stop signal
@@ -150,6 +164,7 @@ class ProcessController:
 
         self.scanner_status.status = "stopped"
         self.scanner_status.last_detail = "Stopped"
+        print(f"  [scanner] Thread stopped", flush=True)
 
     # ------------------------------------------------------------------
     # Executor

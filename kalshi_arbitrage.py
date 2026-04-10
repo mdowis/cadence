@@ -501,11 +501,16 @@ class KalshiClient:
         return self._request("GET", f"{self.base_url}/markets", params=params)
 
     def get_all_markets(self, status="open"):
+        """
+        Page through all markets matching `status`.
+
+        Uses Kalshi's max page size (1000) for efficiency.
+        """
         all_markets = []
         cursor = None
         page = 0
         while True:
-            data = self.get_markets(limit=200, cursor=cursor, status=status)
+            data = self.get_markets(limit=1000, cursor=cursor, status=status)
             markets = data.get("markets", [])
             if not markets:
                 break

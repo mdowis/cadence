@@ -67,6 +67,44 @@
   }
   .mode-badge.demo { background: var(--purple); color: #fff; }
   .mode-badge.live { background: var(--green); color: #000; animation: pulse 2s infinite; }
+  .mode-badge.error { background: var(--red); color: #fff; animation: pulse 1s infinite; }
+
+  /* ---- Scanner error banner ---- */
+  .scanner-error-banner {
+    background: linear-gradient(90deg, #7f1d1d, #991b1b);
+    border-bottom: 2px solid var(--red);
+    color: #fff;
+    padding: 0.75rem 2rem;
+    font-size: 0.8rem;
+    display: none;
+  }
+  .scanner-error-banner.visible { display: block; animation: slide-down 0.3s ease; }
+  .scanner-error-banner strong {
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-right: 0.5rem;
+  }
+  .scanner-error-banner .details {
+    font-family: monospace;
+    opacity: 0.9;
+    margin-top: 0.25rem;
+    word-break: break-all;
+  }
+  @keyframes slide-down {
+    from { transform: translateY(-20px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+
+  .demo-hint-banner {
+    background: rgba(168,85,247,0.12);
+    border-bottom: 1px solid var(--purple);
+    color: var(--purple);
+    padding: 0.6rem 2rem;
+    font-size: 0.75rem;
+    display: none;
+    text-align: center;
+  }
+  .demo-hint-banner.visible { display: block; }
 
   @keyframes pulse {
     0%, 100% { opacity: 1; }
@@ -630,6 +668,18 @@
   </div>
 </div>
 
+<!-- Scanner error banner -->
+<div class="scanner-error-banner" id="scannerErrorBanner">
+  <strong>Scanner Error:</strong>
+  <span id="scannerErrorMsg">—</span>
+  <div class="details" id="scannerErrorDetails"></div>
+</div>
+
+<!-- Demo mode hint (shown when scanner stopped but auth available) -->
+<div class="demo-hint-banner" id="demoHintBanner">
+  Showing demo sample data. Click <strong>Start</strong> on the Market Scanner panel to fetch live Kalshi markets.
+</div>
+
 <!-- Stats -->
 <div class="stats-row" id="statsRow"></div>
 
@@ -868,11 +918,41 @@ function render() {
 
 function renderHeader() {
   const badge = document.getElementById('modeBadge');
-  badge.textContent = data.mode.toUpperCase();
-  badge.className = 'mode-badge ' + data.mode;
+  const hasError = !!(data.scanner_error);
+
+  if (hasError) {
+    badge.textContent = 'ERROR';
+    badge.className = 'mode-badge error';
+  } else {
+    badge.textContent = data.mode.toUpperCase();
+    badge.className = 'mode-badge ' + data.mode;
+  }
 
   const ts = data.timestamp ? new Date(data.timestamp).toLocaleTimeString() : '—';
-  document.getElementById('lastScan').textContent = 'Last scan: ' + ts;
+  const scanInfo = data.scanner_detail ? ` — ${data.scanner_detail}` : '';
+  document.getElementById('lastScan').textContent = 'Last scan: ' + ts + scanInfo;
+
+  // Scanner error banner
+  const errBanner = document.getElementById('scannerErrorBanner');
+  if (hasError) {
+    errBanner.classList.add('visible');
+    document.getElementById('scannerErrorMsg').textContent = data.scanner_error;
+    document.getElementById('scannerErrorDetails').textContent = data.scanner_detail || '';
+  } else {
+    errBanner.classList.remove('visible');
+  }
+
+  // Demo hint banner: show if in demo mode AND processes show authenticated AND scanner not running
+  const hintBanner = document.getElementById('demoHintBanner');
+  const scannerRunning = processData && processData.scanner &&
+                         (processData.scanner.status === 'running' ||
+                          processData.scanner.status === 'starting');
+  const authed = processData && processData.authenticated;
+  if (data.mode === 'demo' && authed && !scannerRunning && !hasError) {
+    hintBanner.classList.add('visible');
+  } else {
+    hintBanner.classList.remove('visible');
+  }
 }
 
 function renderStats() {
@@ -1400,7 +1480,7 @@ function esc(s) {
 // ---- Init ----
 fetchData();
 // Auto-refresh every 15s
-autoRefreshInterval = setInterval(fetchData, 15000);
+autoRefreshInterval = setInterval(fetchData, 5000);
 
 // Resize handler
 window.addEventListener('resize', () => {

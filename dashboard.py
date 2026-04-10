@@ -209,7 +209,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.wfile.write(html_path.read_bytes())
         elif self.path == "/api/scan":
             with _scan_lock:
-                self._json(_latest_scan)
+                payload = dict(_latest_scan)
+            # Merge scanner error state so the frontend can show it prominently
+            if _process_ctrl:
+                scanner = _process_ctrl.scanner_status
+                payload["scanner_status"] = scanner.status
+                payload["scanner_error"] = scanner.last_error or ""
+                payload["scanner_detail"] = scanner.last_detail or ""
+            self._json(payload)
         elif self.path == "/api/risk":
             if _risk_mgr:
                 self._json(_risk_mgr.get_status())
@@ -456,7 +463,17 @@ Then open http://localhost:8050
     print(f"  Press Ctrl+C to stop")
     print()
 
-    # 8. Start web server
+    # 8. Auto-start scanner if authenticated (user wants live data)
+    # Executor still requires explicit start via the dashboard.
+    if authenticated and env_bool("CADENCE_AUTOSTART_SCANNER", True):
+        success, msg = _process_ctrl.start_scanner()
+        if success:
+            print(f"  Scanner: auto-started ({msg})")
+        else:
+            print(f"  Scanner: auto-start failed - {msg}")
+        print()
+
+    # 9. Start web server
     server = HTTPServer(("0.0.0.0", args.port), DashboardHandler)
     try:
         server.serve_forever()
