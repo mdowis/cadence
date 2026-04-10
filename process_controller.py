@@ -47,7 +47,8 @@ class ProcessController:
     """
 
     def __init__(self, trader, risk_mgr, scan_callback, execute_callback,
-                 min_profit=1, interval=15, dry_run=True):
+                 min_profit=1, interval=15, dry_run=True, max_markets=None):
+        self.max_markets = max_markets
         self.trader = trader
         self.risk_mgr = risk_mgr
         self.scan_callback = scan_callback      # fn(markets_list) -> list of opps
@@ -115,9 +116,10 @@ class ProcessController:
             t_start = time.time()
             try:
                 # Fetch markets
-                print(f"  [scanner] Fetching open markets from Kalshi...", flush=True)
+                cap_str = f" (cap {self.max_markets})" if self.max_markets else ""
+                print(f"  [scanner] Fetching open markets from Kalshi{cap_str}...", flush=True)
                 self.scanner_status.last_detail = "Fetching markets..."
-                markets = self.trader.get_all_markets()
+                markets = self.trader.get_all_markets(max_markets=self.max_markets)
                 print(f"  [scanner] Got {len(markets)} markets in "
                       f"{time.time()-t_start:.1f}s", flush=True)
 
@@ -275,6 +277,7 @@ class ProcessController:
                 "min_profit": self.min_profit,
                 "contracts_per_leg": self.contracts_per_leg,
                 "dry_run": self.dry_run,
+                "max_markets": self.max_markets,
             },
         }
 

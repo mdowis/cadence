@@ -225,9 +225,12 @@ For the dynamic (`_PCT`) limits: leave blank or omit to disable, set to `2` for 
 ```bash
 CADENCE_INTERVAL=15                    # Seconds between scans
 CADENCE_CONTRACTS=1                    # Contracts per leg
+CADENCE_MAX_MARKETS=                   # Cap markets per scan (blank = all)
 CADENCE_PORT=8050                      # Dashboard port
 CADENCE_STATE_FILE=risk_state.json     # Persist risk state across restarts
 ```
+
+**About `CADENCE_MAX_MARKETS`:** Kalshi has tens of thousands of open markets across series (weather, crypto, stocks, etc.). A full scan normally takes 30–90 seconds. If your scan interval is shorter than a full scan, set this to a smaller number (e.g. `5000`) so the scanner can keep up. Leave blank to scan everything.
 
 Environment variables set in your shell take priority over `.env`. Both beat the defaults.
 

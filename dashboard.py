@@ -466,6 +466,7 @@ All configuration via .env file or environment variables:
   CADENCE_DAILY_LOSS_LIMIT  Max daily loss in cents (default 2000)
   CADENCE_DAILY_LOSS_LIMIT_PCT  Max daily loss as % of daily start (dynamic, opt-in)
   CADENCE_INTERVAL         Seconds between scans (default 15)
+  CADENCE_MAX_MARKETS      Cap markets per scan (default: all; Kalshi has ~50K+)
   CADENCE_MIN_PROFIT       Min net profit in cents (default 2)
   CADENCE_STATE_FILE       Risk state persistence file
 
@@ -549,6 +550,8 @@ Then open http://localhost:8050
             print(f"  WARNING: Could not sync balance: {e}")
 
     # 5. Initialize process controller
+    max_markets = os.environ.get("CADENCE_MAX_MARKETS", "").strip()
+    max_markets_int = int(max_markets) if max_markets.isdigit() else None
     _process_ctrl = ProcessController(
         trader=_trader,
         risk_mgr=_risk_mgr,
@@ -557,6 +560,7 @@ Then open http://localhost:8050
         min_profit=env_float("CADENCE_MIN_PROFIT", 2),
         interval=env_int("CADENCE_INTERVAL", 15),
         dry_run=True,  # default to dry run; user enables live via dashboard
+        max_markets=max_markets_int,
     )
     _process_ctrl.contracts_per_leg = env_int("CADENCE_CONTRACTS", 1)
 

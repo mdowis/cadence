@@ -516,38 +516,72 @@ class KalshiClient:
             params["event_ticker"] = event_ticker
         return self._request("GET", f"{self.base_url}/markets", params=params)
 
-    MAX_PAGES = 50  # Safety cap: 50 pages x 1000 = 50,000 markets
+    MAX_PAGES = 500        # Safety cap: 500 pages x 1000 = 500,000 markets
+    BASE_DELAY = 0.02      # Seconds between paginated requests (reduced for speed)
+    PROGRESS_EVERY = 10    # Log a progress line every N pages
 
-    def get_all_markets(self, status="open"):
+    def get_all_markets(self, status="open", max_markets=None):
         """
         Page through all markets matching `status`.
 
-        Uses Kalshi's max page size (1000) and stops after MAX_PAGES
-        pages as a safety guard against API-level infinite loops.
+        Uses Kalshi's max page size (1000). Detects infinite loops by
+        tracking unique tickers — if a page yields no new ones, stops.
+
+        Args:
+            status: Kalshi status filter ("open", "closed", etc.)
+            max_markets: Optional soft cap. Stop once we've collected this
+                many unique markets even if more pages exist.
+
+        Returns:
+            List of unique market dicts.
         """
         all_markets = []
+        seen_tickers = set()
         cursor = None
-        seen_cursors = set()
+        t_start = time.time()
+
         for page in range(self.MAX_PAGES):
             data = self.get_markets(limit=1000, cursor=cursor, status=status)
             markets = data.get("markets", [])
             if not markets:
                 break
-            all_markets.extend(markets)
-            next_cursor = data.get("cursor")
-            if not next_cursor:
+
+            # Count how many are actually new
+            new_count = 0
+            for m in markets:
+                ticker = m.get("ticker")
+                if ticker and ticker not in seen_tickers:
+                    seen_tickers.add(ticker)
+                    all_markets.append(m)
+                    new_count += 1
+
+            # Progress log (periodic, not every page)
+            if (page + 1) % self.PROGRESS_EVERY == 0:
+                elapsed = time.time() - t_start
+                print(f"  [scanner] page {page + 1}: {len(all_markets)} unique "
+                      f"markets in {elapsed:.1f}s", flush=True)
+
+            # If the page returned only duplicates, pagination is looping
+            if new_count == 0:
+                print(f"  [scanner] page {page + 1} yielded 0 new tickers, "
+                      f"stopping (have {len(all_markets)})", flush=True)
                 break
-            # Guard against loops if API returns the same cursor
-            if next_cursor in seen_cursors:
-                print(f"  [scanner] WARNING: repeated cursor {next_cursor!r}, "
-                      f"stopping pagination at page {page}", flush=True)
+
+            # Soft cap
+            if max_markets and len(all_markets) >= max_markets:
+                print(f"  [scanner] hit max_markets={max_markets} cap, "
+                      f"stopping pagination", flush=True)
                 break
-            seen_cursors.add(next_cursor)
-            cursor = next_cursor
+
+            cursor = data.get("cursor")
+            if not cursor:
+                break
             time.sleep(self.BASE_DELAY)
         else:
             print(f"  [scanner] WARNING: hit MAX_PAGES={self.MAX_PAGES} "
-                  f"safety limit", flush=True)
+                  f"safety limit. Collected {len(all_markets)} markets. "
+                  f"Set CADENCE_MAX_MARKETS to limit scan size, or contact "
+                  f"maintainer to raise MAX_PAGES.", flush=True)
         return all_markets
 
     def get_event(self, event_ticker):
