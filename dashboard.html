@@ -774,6 +774,8 @@
           <span id="drawdownLabel">0%</span>
           <span id="drawdownLimit">Limit: —</span>
         </div>
+        <div style="font-size:0.6rem; color:var(--text-dim); margin-top:0.75rem">EFFECTIVE LIMITS</div>
+        <div id="effectiveLimits" style="font-size:0.7rem;margin-top:0.25rem"></div>
         <div id="riskButtons"></div>
         <div style="font-size:0.6rem; color:var(--text-dim); margin-top:0.75rem">RECENT EVENTS</div>
         <div class="risk-events" id="riskEvents"></div>
@@ -1359,6 +1361,32 @@ function renderRisk() {
                              ddPct < maxDd * 0.75 ? 'var(--yellow)' : 'var(--red)';
   document.getElementById('drawdownLabel').textContent = ddPct.toFixed(1) + '% drawn down';
   document.getElementById('drawdownLimit').textContent = 'Kill at ' + maxDd + '%';
+
+  // Effective (dynamic) limits
+  const ptLimit = r.effective_per_trade_limit_cents;
+  const ptBasis = r.per_trade_limit_basis || 'none';
+  const dlLimit = r.effective_daily_loss_limit_cents;
+  const dlBasis = r.daily_loss_limit_basis || 'none';
+  const isDynamic = (basis) => basis && (basis.includes('%'));
+  const ptColor = isDynamic(ptBasis) ? 'var(--cyan)' : 'var(--text)';
+  const dlColor = isDynamic(dlBasis) ? 'var(--cyan)' : 'var(--text)';
+
+  document.getElementById('effectiveLimits').innerHTML = `
+    <div style="display:flex;justify-content:space-between;padding:0.2rem 0">
+      <span style="color:var(--text-dim)">Max per trade:</span>
+      <span style="color:${ptColor}">
+        ${ptLimit !== null ? '$' + (ptLimit / 100).toFixed(2) : '—'}
+        <span style="color:var(--text-dim);font-size:0.6rem">(${esc(ptBasis)})</span>
+      </span>
+    </div>
+    <div style="display:flex;justify-content:space-between;padding:0.2rem 0">
+      <span style="color:var(--text-dim)">Daily loss cap:</span>
+      <span style="color:${dlColor}">
+        ${dlLimit !== null ? '$' + (dlLimit / 100).toFixed(2) : '—'}
+        <span style="color:var(--text-dim);font-size:0.6rem">(${esc(dlBasis)})</span>
+      </span>
+    </div>
+  `;
 
   // Buttons
   const btnContainer = document.getElementById('riskButtons');

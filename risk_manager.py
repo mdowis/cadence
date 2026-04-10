@@ -33,17 +33,24 @@ class RiskConfig:
     """
     All limits in cents unless noted. Set any to None to disable that check.
     """
-    # -- Kill switch --
-    # Max drawdown from peak equity before halting ALL trading
+    # -- Kill switch (trailing drawdown from peak equity) --
     max_drawdown_pct: float = 10.0          # 10% from peak → kill switch
     max_drawdown_cents: int = None          # Absolute drawdown cap (e.g. 5000 = $50)
 
     # -- Daily limits --
-    daily_loss_limit_cents: int = 2000      # Max loss per calendar day ($20)
+    # daily_loss_limit_cents: flat cents cap (hardcoded)
+    # daily_loss_limit_pct:   % of today's starting balance (dynamic, trails equity)
+    # If BOTH are set, the more restrictive (smaller) one wins.
+    daily_loss_limit_cents: int = 2000      # Max loss per day in cents ($20)
+    daily_loss_limit_pct: float = None      # Max loss per day as % of daily start
     daily_trade_limit: int = 100            # Max number of trades per day
 
     # -- Per-trade limits --
-    max_per_trade_cents: int = 500          # Max cost of any single arb trade ($5)
+    # max_per_trade_cents: flat cents cap (hardcoded)
+    # max_per_trade_pct:   % of current equity (dynamic, trails equity)
+    # If BOTH are set, the more restrictive (smaller) one wins.
+    max_per_trade_cents: int = 500          # Max cost per trade in cents ($5)
+    max_per_trade_pct: float = None         # Max cost per trade as % of equity
     max_contracts_per_leg: int = 50         # Max contracts on any single leg
 
     # -- Exposure limits --
@@ -136,6 +143,8 @@ class RiskManager:
             starting_equity_cents=starting_equity_cents,
             peak_equity_cents=starting_equity_cents,
             current_equity_cents=starting_equity_cents,
+            daily_starting_balance_cents=starting_equity_cents,
+            daily_date=time.strftime("%Y-%m-%d"),
         )
         self.state_file = state_file
         self._lock = Lock()
@@ -187,22 +196,25 @@ class RiskManager:
             trade_cost = opportunity.total_cost * contracts
             event_ticker = opportunity.event_ticker
 
-            # 3. Per-trade size limit
-            if self.config.max_per_trade_cents and trade_cost > self.config.max_per_trade_cents:
+            # 3. Per-trade size limit (dynamic: % of equity, static cents, or both)
+            per_trade_limit = self._effective_per_trade_limit()
+            if per_trade_limit is not None and trade_cost > per_trade_limit:
                 return RiskDecision(
                     RiskAction.BLOCK_PER_TRADE,
                     f"Trade cost {trade_cost}¢ exceeds per-trade limit "
-                    f"{self.config.max_per_trade_cents}¢"
+                    f"{int(per_trade_limit)}¢ "
+                    f"(basis: {self._per_trade_limit_basis()})"
                 )
 
-            # 4. Daily loss limit
-            if self.config.daily_loss_limit_cents:
-                if self.state.daily_pnl_cents <= -self.config.daily_loss_limit_cents:
-                    return RiskDecision(
-                        RiskAction.BLOCK_DAILY_LOSS,
-                        f"Daily P&L {self.state.daily_pnl_cents}¢ hit limit "
-                        f"-{self.config.daily_loss_limit_cents}¢"
-                    )
+            # 4. Daily loss limit (dynamic: % of daily start, static cents, or both)
+            daily_limit = self._effective_daily_loss_limit()
+            if daily_limit is not None and self.state.daily_pnl_cents <= -daily_limit:
+                return RiskDecision(
+                    RiskAction.BLOCK_DAILY_LOSS,
+                    f"Daily P&L {self.state.daily_pnl_cents}¢ hit limit "
+                    f"-{int(daily_limit)}¢ "
+                    f"(basis: {self._daily_loss_limit_basis()})"
+                )
 
             # 5. Daily trade count
             if self.config.daily_trade_limit:
@@ -428,6 +440,9 @@ class RiskManager:
             drawdown_cents = peak - equity
             drawdown_pct = (drawdown_cents / peak * 100) if peak > 0 else 0
 
+            per_trade_limit = self._effective_per_trade_limit()
+            daily_limit = self._effective_daily_loss_limit()
+
             return {
                 "equity_cents": equity,
                 "peak_equity_cents": peak,
@@ -449,7 +464,102 @@ class RiskManager:
                 "total_trades": len(self.state.trade_history),
                 "config": self.config.to_dict(),
                 "risk_events": self.state.risk_events[-20:],  # last 20
+                # Effective (dynamic) limits - what's actually being enforced now
+                "effective_per_trade_limit_cents": (
+                    int(per_trade_limit) if per_trade_limit is not None else None
+                ),
+                "per_trade_limit_basis": self._per_trade_limit_basis(),
+                "effective_daily_loss_limit_cents": (
+                    int(daily_limit) if daily_limit is not None else None
+                ),
+                "daily_loss_limit_basis": self._daily_loss_limit_basis(),
             }
+
+    # ------------------------------------------------------------------
+    # Dynamic limit computation
+    # ------------------------------------------------------------------
+
+    def _effective_per_trade_limit(self):
+        """
+        Compute the effective max per-trade cost in cents.
+
+        Rules:
+          - If only max_per_trade_cents is set: return it (flat)
+          - If only max_per_trade_pct is set: return pct * current_equity / 100
+          - If BOTH are set: return the smaller (more restrictive) value
+          - If NEITHER is set: return None (no per-trade limit)
+        """
+        cents_limit = self.config.max_per_trade_cents
+        pct = self.config.max_per_trade_pct
+        pct_limit = None
+        if pct and pct > 0:
+            equity = self.state.current_equity_cents
+            if equity > 0:
+                pct_limit = (pct / 100.0) * equity
+
+        if cents_limit and pct_limit is not None:
+            return min(cents_limit, pct_limit)
+        if cents_limit:
+            return float(cents_limit)
+        if pct_limit is not None:
+            return pct_limit
+        return None
+
+    def _per_trade_limit_basis(self):
+        """Human-readable description of which limit is active right now."""
+        cents_limit = self.config.max_per_trade_cents
+        pct = self.config.max_per_trade_pct
+        equity = self.state.current_equity_cents
+        pct_val = (pct / 100.0) * equity if (pct and equity > 0) else None
+
+        if cents_limit and pct_val is not None:
+            return (f"{pct}% of equity" if pct_val < cents_limit
+                    else f"{cents_limit}c flat")
+        if pct_val is not None:
+            return f"{pct}% of equity"
+        if cents_limit:
+            return f"{cents_limit}c flat"
+        return "none"
+
+    def _effective_daily_loss_limit(self):
+        """
+        Compute the effective daily loss limit in cents.
+
+        Rules mirror per-trade: if both cents and pct set, use the smaller.
+        pct is computed against today's STARTING balance (captured at midnight).
+        """
+        cents_limit = self.config.daily_loss_limit_cents
+        pct = self.config.daily_loss_limit_pct
+        pct_limit = None
+        if pct and pct > 0:
+            daily_start = self.state.daily_starting_balance_cents
+            if daily_start > 0:
+                pct_limit = (pct / 100.0) * daily_start
+
+        if cents_limit and pct_limit is not None:
+            return min(cents_limit, pct_limit)
+        if cents_limit:
+            return float(cents_limit)
+        if pct_limit is not None:
+            return pct_limit
+        return None
+
+    def _daily_loss_limit_basis(self):
+        """Human-readable description of which limit is active right now."""
+        cents_limit = self.config.daily_loss_limit_cents
+        pct = self.config.daily_loss_limit_pct
+        daily_start = self.state.daily_starting_balance_cents
+        pct_val = ((pct / 100.0) * daily_start
+                   if (pct and daily_start > 0) else None)
+
+        if cents_limit and pct_val is not None:
+            return (f"{pct}% of daily start" if pct_val < cents_limit
+                    else f"{cents_limit}c flat")
+        if pct_val is not None:
+            return f"{pct}% of daily start"
+        if cents_limit:
+            return f"{cents_limit}c flat"
+        return "none"
 
     # ------------------------------------------------------------------
     # Internal helpers

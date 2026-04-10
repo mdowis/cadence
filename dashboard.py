@@ -341,12 +341,25 @@ def env_bool(key, default):
     return val in ("true", "1", "yes", "on")
 
 
+def env_optional_float(key):
+    """Return float if env var is set and non-empty, else None."""
+    val = os.environ.get(key, "").strip()
+    if not val:
+        return None
+    try:
+        return float(val)
+    except ValueError:
+        return None
+
+
 def build_risk_config():
     """Build RiskConfig from environment variables with sane defaults."""
     return RiskConfig(
         max_drawdown_pct=env_float("CADENCE_MAX_DRAWDOWN_PCT", 10.0),
         daily_loss_limit_cents=env_int("CADENCE_DAILY_LOSS_LIMIT", 2000),
+        daily_loss_limit_pct=env_optional_float("CADENCE_DAILY_LOSS_LIMIT_PCT"),
         max_per_trade_cents=env_int("CADENCE_MAX_PER_TRADE", 500),
+        max_per_trade_pct=env_optional_float("CADENCE_MAX_PER_TRADE_PCT"),
         max_total_exposure_cents=env_int("CADENCE_MAX_EXPOSURE", 10000),
         max_consecutive_losses=env_int("CADENCE_MAX_CONSECUTIVE_LOSSES", 5),
         min_net_profit_cents=env_float("CADENCE_MIN_PROFIT", 2),
@@ -368,9 +381,11 @@ All configuration via .env file or environment variables:
   CADENCE_PORT             Dashboard port (default 8050)
   CADENCE_EQUITY           Starting equity in cents if balance sync disabled
   CADENCE_SYNC_BALANCE     Use live Kalshi balance (default true)
-  CADENCE_MAX_DRAWDOWN_PCT Kill switch drawdown % (default 10)
-  CADENCE_MAX_PER_TRADE    Max cents per trade (default 500)
-  CADENCE_DAILY_LOSS_LIMIT Max daily loss in cents (default 2000)
+  CADENCE_MAX_DRAWDOWN_PCT  Kill switch drawdown % (default 10)
+  CADENCE_MAX_PER_TRADE     Max cents per trade (default 500)
+  CADENCE_MAX_PER_TRADE_PCT Max trade size as % of equity (dynamic, opt-in)
+  CADENCE_DAILY_LOSS_LIMIT  Max daily loss in cents (default 2000)
+  CADENCE_DAILY_LOSS_LIMIT_PCT  Max daily loss as % of daily start (dynamic, opt-in)
   CADENCE_INTERVAL         Seconds between scans (default 15)
   CADENCE_MIN_PROFIT       Min net profit in cents (default 2)
   CADENCE_STATE_FILE       Risk state persistence file
@@ -453,9 +468,15 @@ Then open http://localhost:8050
     if authenticated:
         status = _risk_mgr.get_status()
         print(f"  Equity:         ${status['equity_cents']/100:.2f}")
-        print(f"  Max drawdown:   {risk_config.max_drawdown_pct}%")
-        print(f"  Max per trade:  ${risk_config.max_per_trade_cents/100:.2f}")
-        print(f"  Daily limit:    ${risk_config.daily_loss_limit_cents/100:.2f}")
+        print(f"  Max drawdown:   {risk_config.max_drawdown_pct}% from peak (trailing)")
+        pt_limit = status.get("effective_per_trade_limit_cents")
+        pt_basis = status.get("per_trade_limit_basis", "none")
+        if pt_limit is not None:
+            print(f"  Max per trade:  ${pt_limit/100:.2f} [{pt_basis}]")
+        daily_limit = status.get("effective_daily_loss_limit_cents")
+        daily_basis = status.get("daily_loss_limit_basis", "none")
+        if daily_limit is not None:
+            print(f"  Daily limit:    ${daily_limit/100:.2f} [{daily_basis}]")
     else:
         print(f"  Set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH in .env for live mode")
     print()

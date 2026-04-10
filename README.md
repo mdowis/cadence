@@ -86,14 +86,21 @@ Every trade must pass all of the following checks before execution:
 
 | Check | Default | Description |
 |---|---|---|
-| Drawdown kill switch | 10% from peak | Auto-halts all trading, requires manual resume |
-| Daily loss limit | $20 | No new trades after hitting daily P&L floor |
-| Per-trade size cap | $5 | Rejects any single arb costing more |
+| Drawdown kill switch (trailing) | 10% from peak | Auto-halts all trading. Peak updates as equity grows, so the threshold trails your high-water mark. |
+| Daily loss limit | $20 flat, or % of daily start | No new trades after hitting today's loss floor. Both flat cents and % of today's starting balance are supported; the smaller wins. |
+| Per-trade size cap | $5 flat, or % of equity | Rejects oversized arbs. Both flat cents and % of current equity are supported; the smaller wins. Dynamic % trails your equity up or down. |
 | Total exposure cap | $100 | No new trades when fully deployed |
 | Per-event exposure | $20 | Prevents concentration in one outcome |
 | Consecutive loss breaker | 5 losses, 5min cooldown | Automatic pause after streak |
 | Min net profit | 1c | Ignores sub-penny arbs |
 | Min ROI | 0.5% | Ignores trades not worth the execution risk |
+
+**Trailing limits.** Three limits trail your equity automatically:
+- **Drawdown kill switch** tracks peak equity — as you profit, your safety margin moves up with you
+- **`CADENCE_MAX_PER_TRADE_PCT`** (opt-in) scales trade size with current equity
+- **`CADENCE_DAILY_LOSS_LIMIT_PCT`** (opt-in) scales daily loss cap with today's starting balance
+
+When both flat and % limits are set for per-trade or daily-loss, the more restrictive one wins at any given moment. Everything else is flat.
 
 The kill switch can be triggered three ways:
 1. **Automatically** by drawdown exceeding the configured threshold
@@ -201,13 +208,17 @@ Without credentials, the dashboard still runs in demo mode so you can explore th
 ```bash
 CADENCE_EQUITY=5000                    # Starting equity if balance sync off
 CADENCE_SYNC_BALANCE=true              # Pull real cash balance from Kalshi
-CADENCE_MAX_DRAWDOWN_PCT=10            # Kill switch at this % drawdown from peak
-CADENCE_DAILY_LOSS_LIMIT=2000          # Max loss per day ($20)
-CADENCE_MAX_PER_TRADE=500              # Max cost per arb trade ($5)
+CADENCE_MAX_DRAWDOWN_PCT=10            # Kill switch at this % drawdown from peak (trailing)
+CADENCE_DAILY_LOSS_LIMIT=2000          # Flat max loss per day in cents ($20)
+CADENCE_DAILY_LOSS_LIMIT_PCT=          # Dynamic: % of today's starting balance (opt-in)
+CADENCE_MAX_PER_TRADE=500              # Flat max cost per trade in cents ($5)
+CADENCE_MAX_PER_TRADE_PCT=             # Dynamic: % of current equity (opt-in)
 CADENCE_MAX_EXPOSURE=10000             # Max total open exposure ($100)
 CADENCE_MAX_CONSECUTIVE_LOSSES=5       # Circuit breaker threshold
 CADENCE_MIN_PROFIT=2                   # Minimum net profit to trade
 ```
+
+For the dynamic (`_PCT`) limits: leave blank or omit to disable, set to `2` for 2%, etc. When both the flat cents and % variants are set for the same limit, the smaller (more restrictive) one wins on every trade check.
 
 ### Scanner / executor
 

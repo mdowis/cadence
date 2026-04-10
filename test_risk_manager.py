@@ -246,6 +246,130 @@ def test_balance_sync_computes_daily_pnl():
     assert rm.state.daily_pnl_cents == 300
 
 
+# --- Dynamic per-trade limit (% of equity) ---
+
+def test_per_trade_pct_only():
+    """Only pct set: limit = pct * equity / 100."""
+    config = RiskConfig(max_per_trade_cents=None, max_per_trade_pct=2.0)
+    rm = RiskManager(config=config, starting_equity_cents=10000)
+    assert rm._effective_per_trade_limit() == 200.0  # 2% of 10000c = 200c
+
+
+def test_per_trade_pct_scales_with_equity():
+    """As equity grows, the per-trade limit grows with it."""
+    config = RiskConfig(max_per_trade_cents=None, max_per_trade_pct=5.0)
+    rm = RiskManager(config=config, starting_equity_cents=10000)
+    assert rm._effective_per_trade_limit() == 500.0  # 5% of 10000
+
+    # Simulate equity growing to 20000
+    rm.sync_actual_balance(20000)
+    assert rm._effective_per_trade_limit() == 1000.0  # 5% of 20000
+
+
+def test_per_trade_pct_shrinks_with_equity():
+    """As equity shrinks, the per-trade limit shrinks with it."""
+    config = RiskConfig(max_per_trade_cents=None, max_per_trade_pct=5.0)
+    rm = RiskManager(config=config, starting_equity_cents=10000)
+    rm.sync_actual_balance(6000)  # lost $40
+    assert rm._effective_per_trade_limit() == 300.0  # 5% of 6000
+
+
+def test_per_trade_both_uses_smaller():
+    """If both set, use the more restrictive (smaller) value."""
+    # pct gives 200, cents gives 500 → should use 200
+    config = RiskConfig(max_per_trade_cents=500, max_per_trade_pct=2.0)
+    rm = RiskManager(config=config, starting_equity_cents=10000)
+    assert rm._effective_per_trade_limit() == 200.0
+
+    # pct gives 500, cents gives 300 → should use 300
+    config = RiskConfig(max_per_trade_cents=300, max_per_trade_pct=5.0)
+    rm = RiskManager(config=config, starting_equity_cents=10000)
+    assert rm._effective_per_trade_limit() == 300.0
+
+
+def test_per_trade_pct_blocks_oversized_trade():
+    """A trade larger than the dynamic pct limit should be blocked."""
+    config = RiskConfig(max_per_trade_cents=None, max_per_trade_pct=2.0)
+    rm = RiskManager(config=config, starting_equity_cents=10000)
+    # pct limit = 200c. Trade cost = 300c → blocked
+    opp = make_opp(total_cost=300)
+    decision = rm.check_trade(opp)
+    assert decision.action == RiskAction.BLOCK_PER_TRADE
+    assert "2.0% of equity" in decision.reason
+
+
+def test_per_trade_pct_allows_fitting_trade():
+    config = RiskConfig(max_per_trade_cents=None, max_per_trade_pct=5.0)
+    rm = RiskManager(config=config, starting_equity_cents=10000)
+    opp = make_opp(total_cost=300)  # under 500 limit
+    decision = rm.check_trade(opp)
+    assert decision.allowed
+
+
+# --- Dynamic daily loss limit (% of daily start) ---
+
+def test_daily_loss_pct_only():
+    config = RiskConfig(daily_loss_limit_cents=None, daily_loss_limit_pct=5.0)
+    rm = RiskManager(config=config, starting_equity_cents=10000)
+    rm.state.daily_starting_balance_cents = 10000
+    assert rm._effective_daily_loss_limit() == 500.0  # 5% of 10000
+
+
+def test_daily_loss_pct_uses_daily_start_not_current():
+    """
+    Daily loss limit should be computed from TODAY'S STARTING balance,
+    not current equity. This prevents the limit from shrinking mid-day
+    as you take losses.
+    """
+    config = RiskConfig(daily_loss_limit_cents=None, daily_loss_limit_pct=5.0)
+    rm = RiskManager(config=config, starting_equity_cents=10000)
+    rm.state.daily_starting_balance_cents = 10000
+    rm.state.current_equity_cents = 9500  # lost 500 today
+
+    # Limit is still 5% of 10000 = 500, not 5% of 9500
+    assert rm._effective_daily_loss_limit() == 500.0
+
+
+def test_daily_loss_pct_blocks_when_hit():
+    config = RiskConfig(daily_loss_limit_cents=None, daily_loss_limit_pct=5.0)
+    rm = RiskManager(config=config, starting_equity_cents=10000)
+    rm.state.daily_starting_balance_cents = 10000
+    rm.state.daily_date = time.strftime("%Y-%m-%d")
+    rm.state.daily_pnl_cents = -500  # exactly at 5% loss
+
+    decision = rm.check_trade(make_opp())
+    assert decision.action == RiskAction.BLOCK_DAILY_LOSS
+    assert "5.0% of daily start" in decision.reason
+
+
+def test_daily_loss_both_uses_smaller():
+    # pct gives 500, cents gives 2000 → use 500
+    config = RiskConfig(daily_loss_limit_cents=2000, daily_loss_limit_pct=5.0)
+    rm = RiskManager(config=config, starting_equity_cents=10000)
+    rm.state.daily_starting_balance_cents = 10000
+    assert rm._effective_daily_loss_limit() == 500.0
+
+    # pct gives 500, cents gives 300 → use 300
+    config = RiskConfig(daily_loss_limit_cents=300, daily_loss_limit_pct=5.0)
+    rm = RiskManager(config=config, starting_equity_cents=10000)
+    rm.state.daily_starting_balance_cents = 10000
+    assert rm._effective_daily_loss_limit() == 300.0
+
+
+def test_dynamic_limits_in_status():
+    """get_status should expose effective limits for dashboard display."""
+    config = RiskConfig(max_per_trade_cents=None, max_per_trade_pct=2.0,
+                        daily_loss_limit_cents=None, daily_loss_limit_pct=5.0)
+    rm = RiskManager(config=config, starting_equity_cents=10000)
+    rm.state.daily_starting_balance_cents = 10000
+
+    status = rm.get_status()
+    assert status["effective_per_trade_limit_cents"] == 200  # 2% of 10000
+    assert status["effective_daily_loss_limit_cents"] == 500  # 5% of 10000
+    assert "2.0% of equity" in status["per_trade_limit_basis"]
+    assert "5.0% of daily start" in status["daily_loss_limit_basis"]
+
+
 if __name__ == "__main__":
     test_kill_switch_blocks_trades()
     test_kill_switch_can_be_deactivated()
@@ -270,4 +394,15 @@ if __name__ == "__main__":
     test_balance_sync_triggers_drawdown_kill()
     test_balance_sync_adds_exposure()
     test_balance_sync_computes_daily_pnl()
-    print("All 23 risk manager tests passed!")
+    test_per_trade_pct_only()
+    test_per_trade_pct_scales_with_equity()
+    test_per_trade_pct_shrinks_with_equity()
+    test_per_trade_both_uses_smaller()
+    test_per_trade_pct_blocks_oversized_trade()
+    test_per_trade_pct_allows_fitting_trade()
+    test_daily_loss_pct_only()
+    test_daily_loss_pct_uses_daily_start_not_current()
+    test_daily_loss_pct_blocks_when_hit()
+    test_daily_loss_both_uses_smaller()
+    test_dynamic_limits_in_status()
+    print("All 34 risk manager tests passed!")
