@@ -1031,16 +1031,31 @@ function renderDiagnostics() {
 }
 
 function renderHeader() {
-  // Data source badge (scanner state)
+  // Data source badge: reflects the scanner's actual running state,
+  // not just the stale data.mode. If the scanner is running but
+  // hasn't completed its first fetch, show "LIVE (starting...)".
   const badge = document.getElementById('modeBadge');
   const hasError = !!(data.scanner_error);
+  const scannerStatus = processData && processData.scanner
+                        ? processData.scanner.status : 'stopped';
+  const scannerRunning = scannerStatus === 'running' ||
+                         scannerStatus === 'starting';
+  const hasCompletedScan = data.mode === 'live';
 
   if (hasError) {
     badge.textContent = 'SCANNER ERROR';
     badge.className = 'mode-badge error';
-  } else if (data.mode === 'live') {
+  } else if (scannerRunning && hasCompletedScan) {
     badge.textContent = 'LIVE DATA';
     badge.className = 'mode-badge live';
+  } else if (scannerRunning) {
+    // Running but no scan has completed yet
+    badge.textContent = 'LIVE (starting...)';
+    badge.className = 'mode-badge live';
+  } else if (hasCompletedScan) {
+    // Scanner stopped but last known data was live
+    badge.textContent = 'LIVE DATA (stale)';
+    badge.className = 'mode-badge demo';
   } else {
     badge.textContent = 'DEMO DATA';
     badge.className = 'mode-badge demo';
@@ -1642,7 +1657,23 @@ function esc(s) {
 // ---- Init ----
 fetchData();
 // Auto-refresh every 15s
-autoRefreshInterval = setInterval(fetchData, 5000);
+// Adaptive polling: fast (2s) when waiting for first scan or on error,
+// slower (5s) once we have steady live data. This makes the transition
+// from "DEMO DATA" to "LIVE DATA" feel snappy on startup.
+function scheduleNextFetch() {
+  clearInterval(autoRefreshInterval);
+  const fast = !data
+    || data.mode !== 'live'
+    || !!data.scanner_error
+    || (processData && processData.scanner &&
+        processData.scanner.status === 'starting');
+  const interval = fast ? 2000 : 5000;
+  autoRefreshInterval = setInterval(async () => {
+    await fetchData();
+    scheduleNextFetch();  // re-evaluate cadence after each fetch
+  }, interval);
+}
+scheduleNextFetch();
 
 // Resize handler
 window.addEventListener('resize', () => {
