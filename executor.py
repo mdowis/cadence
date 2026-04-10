@@ -67,6 +67,24 @@ from kalshi_arbitrage import (
 from risk_manager import RiskManager, RiskConfig, RiskAction
 
 
+# Kalshi order constants
+TIF_IOC = "immediate_or_cancel"  # fill as much as possible now, cancel rest
+TIF_GTC = "good_till_cancelled"  # stay on the book until explicitly cancelled
+
+
+def _cents_to_dollars_str(cents):
+    """
+    Convert integer cents to Kalshi's fixed-point dollar string format.
+
+    Kalshi accepts both legacy cents (yes_price=47) and new dollar strings
+    (yes_price_dollars="0.47"). The new format is required for fractional
+    prices and is the migration target, so we use it everywhere.
+    """
+    if cents is None:
+        return None
+    return f"{cents / 100:.4f}"
+
+
 class KalshiTrader(KalshiClient):
     """
     Extends KalshiClient with order placement capabilities.
@@ -76,9 +94,9 @@ class KalshiTrader(KalshiClient):
     """
 
     def create_order(self, ticker, side, action="buy", count=1,
-                     yes_price=None, no_price=None, time_in_force="ioc"):
+                     yes_price=None, no_price=None, time_in_force=TIF_IOC):
         """
-        Place a single order.
+        Place a single limit order on Kalshi.
 
         Args:
             ticker: Market ticker (e.g. "KXBTC-100K-26JUN30")
@@ -87,7 +105,7 @@ class KalshiTrader(KalshiClient):
             count: Number of contracts
             yes_price: Limit price in cents for yes side (1-99)
             no_price: Limit price in cents for no side (1-99)
-            time_in_force: "ioc" (immediate or cancel) or "gtc" (good til cancelled)
+            time_in_force: "immediate_or_cancel" or "good_till_cancelled"
 
         Returns:
             Order response dict with order_id, status, etc.
@@ -96,15 +114,17 @@ class KalshiTrader(KalshiClient):
             "ticker": ticker,
             "side": side,
             "action": action,
-            "count": count,
-            "type": "limit",
+            "count": int(count),
             "time_in_force": time_in_force,
             "client_order_id": str(uuid.uuid4()),
         }
+        # Use the new fixed-point dollar fields (Kalshi's recommended format
+        # post-March 2026 migration). Presence of a price field makes it a
+        # limit order; there's no explicit "type" field.
         if yes_price is not None:
-            body["yes_price"] = yes_price
+            body["yes_price_dollars"] = _cents_to_dollars_str(yes_price)
         if no_price is not None:
-            body["no_price"] = no_price
+            body["no_price_dollars"] = _cents_to_dollars_str(no_price)
 
         return self._request("POST", f"{self.base_url}/portfolio/orders", json=body)
 
@@ -137,6 +157,32 @@ class KalshiTrader(KalshiClient):
         return self._request("GET", f"{self.base_url}/portfolio/balance")
 
 
+def _yes_order(ticker, price_cents, count, client_order_id=None):
+    """Build a Kalshi limit order to buy YES at the given price."""
+    return {
+        "ticker": ticker,
+        "side": "yes",
+        "action": "buy",
+        "count": int(count),
+        "yes_price_dollars": _cents_to_dollars_str(price_cents),
+        "time_in_force": TIF_IOC,
+        "client_order_id": client_order_id or str(uuid.uuid4()),
+    }
+
+
+def _no_order(ticker, price_cents, count, client_order_id=None):
+    """Build a Kalshi limit order to buy NO at the given price."""
+    return {
+        "ticker": ticker,
+        "side": "no",
+        "action": "buy",
+        "count": int(count),
+        "no_price_dollars": _cents_to_dollars_str(price_cents),
+        "time_in_force": TIF_IOC,
+        "client_order_id": client_order_id or str(uuid.uuid4()),
+    }
+
+
 def build_orders_for_opportunity(opp, contracts=1):
     """
     Convert an ArbitrageOpportunity into a list of Kalshi order dicts.
@@ -144,55 +190,26 @@ def build_orders_for_opportunity(opp, contracts=1):
     For binary arb: buy YES + buy NO on the same market.
     For multi-outcome YES: buy YES on every market in the event.
     For multi-outcome NO: buy NO on every market in the event.
+
+    Orders use Kalshi's post-migration format:
+      - yes_price_dollars / no_price_dollars as "0.4700" strings
+      - time_in_force: "immediate_or_cancel" (full name, not "ioc")
+      - No "type" field (Kalshi infers limit from price presence)
     """
     orders = []
 
     if opp.type == "binary":
         m = opp.markets[0]
-        # Buy YES at the ask price
-        orders.append({
-            "ticker": m["ticker"],
-            "side": "yes",
-            "action": "buy",
-            "count": contracts,
-            "type": "limit",
-            "yes_price": m["yes_ask"],
-            "time_in_force": "ioc",  # immediate-or-cancel: don't leave resting orders
-        })
-        # Buy NO at the ask price
-        orders.append({
-            "ticker": m["ticker"],
-            "side": "no",
-            "action": "buy",
-            "count": contracts,
-            "type": "limit",
-            "no_price": m["no_ask"],
-            "time_in_force": "ioc",
-        })
+        orders.append(_yes_order(m["ticker"], m["yes_ask"], contracts))
+        orders.append(_no_order(m["ticker"], m["no_ask"], contracts))
 
     elif "YES" in opp.type:
         for m in opp.markets:
-            orders.append({
-                "ticker": m["ticker"],
-                "side": "yes",
-                "action": "buy",
-                "count": contracts,
-                "type": "limit",
-                "yes_price": m["yes_ask"],
-                "time_in_force": "ioc",
-            })
+            orders.append(_yes_order(m["ticker"], m["yes_ask"], contracts))
 
     elif "NO" in opp.type:
         for m in opp.markets:
-            orders.append({
-                "ticker": m["ticker"],
-                "side": "no",
-                "action": "buy",
-                "count": contracts,
-                "type": "limit",
-                "no_price": m["no_ask"],
-                "time_in_force": "ioc",
-            })
+            orders.append(_no_order(m["ticker"], m["no_ask"], contracts))
 
     return orders
 
@@ -221,9 +238,9 @@ def execute_opportunity(trader, risk_mgr, opp, contracts=1, dry_run=False):
     if dry_run:
         print(f"    [DRY RUN] Would place {len(orders)} orders:")
         for o in orders:
-            price = o.get("yes_price") or o.get("no_price")
+            price = o.get("yes_price_dollars") or o.get("no_price_dollars")
             print(f"      {o['side'].upper():3s} {o['ticker']} "
-                  f"x{o['count']} @ {price}¢")
+                  f"x{o['count']} @ ${price}")
         risk_mgr.record_trade_opened(opp, contracts)
         return True, f"DRY RUN: {len(orders)} orders logged"
 
