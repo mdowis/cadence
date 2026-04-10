@@ -1095,9 +1095,6 @@ function renderHeader() {
 
   // Demo hint banner: show if in demo mode AND processes show authenticated AND scanner not running
   const hintBanner = document.getElementById('demoHintBanner');
-  const scannerRunning = processData && processData.scanner &&
-                         (processData.scanner.status === 'running' ||
-                          processData.scanner.status === 'starting');
   const authed = processData && processData.authenticated;
   if (data.mode === 'demo' && authed && !scannerRunning && !hasError) {
     hintBanner.classList.add('visible');
