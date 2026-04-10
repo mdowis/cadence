@@ -69,6 +69,33 @@
   .mode-badge.live { background: var(--green); color: #000; animation: pulse 2s infinite; }
   .mode-badge.error { background: var(--red); color: #fff; animation: pulse 1s infinite; }
 
+  /* Second badge: executor state */
+  .exec-badge {
+    font-size: 0.65rem;
+    padding: 0.2rem 0.6rem;
+    border-radius: 9999px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    border: 1px solid;
+  }
+  .exec-badge.off {
+    background: transparent;
+    color: var(--text-dim);
+    border-color: var(--border);
+  }
+  .exec-badge.dryrun {
+    background: rgba(59,130,246,0.15);
+    color: var(--blue);
+    border-color: var(--blue);
+  }
+  .exec-badge.livetrading {
+    background: var(--red);
+    color: #fff;
+    border-color: var(--red);
+    animation: pulse 1s infinite;
+  }
+
   /* ---- Scanner error banner ---- */
   .scanner-error-banner {
     background: linear-gradient(90deg, #7f1d1d, #991b1b);
@@ -660,7 +687,8 @@
 <div class="header">
   <div class="header-left">
     <div class="logo">CADENCE</div>
-    <span class="mode-badge demo" id="modeBadge">DEMO</span>
+    <span class="mode-badge demo" id="modeBadge" title="Scanner data source">DEMO DATA</span>
+    <span class="exec-badge off" id="execBadge" title="Executor trading mode">EXECUTOR OFF</span>
   </div>
   <div class="header-right">
     <span class="last-scan" id="lastScan">Loading...</span>
@@ -1003,15 +1031,37 @@ function renderDiagnostics() {
 }
 
 function renderHeader() {
+  // Data source badge (scanner state)
   const badge = document.getElementById('modeBadge');
   const hasError = !!(data.scanner_error);
 
   if (hasError) {
-    badge.textContent = 'ERROR';
+    badge.textContent = 'SCANNER ERROR';
     badge.className = 'mode-badge error';
+  } else if (data.mode === 'live') {
+    badge.textContent = 'LIVE DATA';
+    badge.className = 'mode-badge live';
   } else {
-    badge.textContent = data.mode.toUpperCase();
-    badge.className = 'mode-badge ' + data.mode;
+    badge.textContent = 'DEMO DATA';
+    badge.className = 'mode-badge demo';
+  }
+
+  // Executor badge (independent from scanner)
+  const execBadge = document.getElementById('execBadge');
+  if (processData && processData.executor) {
+    const execStatus = processData.executor.status;
+    const isRunning = execStatus === 'running' || execStatus === 'starting';
+    const dryRun = processData.config && processData.config.dry_run;
+    if (!isRunning) {
+      execBadge.textContent = 'EXECUTOR OFF';
+      execBadge.className = 'exec-badge off';
+    } else if (dryRun) {
+      execBadge.textContent = 'DRY RUN';
+      execBadge.className = 'exec-badge dryrun';
+    } else {
+      execBadge.textContent = 'LIVE TRADING';
+      execBadge.className = 'exec-badge livetrading';
+    }
   }
 
   const ts = data.timestamp ? new Date(data.timestamp).toLocaleTimeString() : '—';

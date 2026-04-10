@@ -175,16 +175,25 @@ class ProcessController:
     def start_executor(self, contracts=None, dry_run=None):
         with self._lock:
             if self._executor_thread and self._executor_thread.is_alive():
+                print(f"  [executor] start rejected: already running", flush=True)
                 return False, "Executor already running"
             if not self.trader or not self.trader.authenticated:
+                print(f"  [executor] start rejected: not authenticated", flush=True)
                 return False, "Not authenticated - set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH"
-            if not (self._scanner_thread and self._scanner_thread.is_alive()):
+            scanner_alive = self._scanner_thread and self._scanner_thread.is_alive()
+            if not scanner_alive:
+                print(f"  [executor] start rejected: scanner not running "
+                      f"(scanner_status={self.scanner_status.status})", flush=True)
                 return False, "Scanner must be running before starting executor"
 
             if contracts is not None:
                 self.contracts_per_leg = contracts
             if dry_run is not None:
                 self.dry_run = dry_run
+
+            mode = "DRY RUN" if self.dry_run else "LIVE TRADING"
+            print(f"  [executor] Starting in {mode} mode "
+                  f"({self.contracts_per_leg} contracts/leg)", flush=True)
 
             self._executor_stop.clear()
             self.executor_status = ProcessStatus(
@@ -285,11 +294,19 @@ class ProcessController:
                       contracts=None, dry_run=None):
         """Update runtime config (takes effect on next scan/execute cycle)."""
         with self._lock:
-            if interval is not None:
+            changes = []
+            if interval is not None and interval != self.interval:
+                changes.append(f"interval={interval}s")
                 self.interval = interval
-            if min_profit is not None:
+            if min_profit is not None and min_profit != self.min_profit:
+                changes.append(f"min_profit={min_profit}c")
                 self.min_profit = min_profit
-            if contracts is not None:
+            if contracts is not None and contracts != self.contracts_per_leg:
+                changes.append(f"contracts={contracts}")
                 self.contracts_per_leg = contracts
-            if dry_run is not None:
+            if dry_run is not None and dry_run != self.dry_run:
+                mode = "DRY RUN" if dry_run else "LIVE TRADING"
+                changes.append(f"dry_run={dry_run} ({mode})")
                 self.dry_run = dry_run
+            if changes:
+                print(f"  [config] updated: {', '.join(changes)}", flush=True)
