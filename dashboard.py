@@ -333,15 +333,30 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             result = {"authenticated": _trader.authenticated}
             try:
                 import time as _t
+                from kalshi_arbitrage import normalize_market
+                import copy
                 t0 = _t.time()
                 data = _trader.get_markets(limit=5, status="open")
                 elapsed = _t.time() - t0
                 markets = data.get("markets", [])
+                first_raw = markets[0] if markets else None
+                first_normalized = None
+                if first_raw is not None:
+                    first_normalized = normalize_market(copy.deepcopy(first_raw))
+                # Show which key categories exist on the raw first market
+                price_keys = []
+                if first_raw:
+                    price_keys = sorted([
+                        k for k in first_raw.keys()
+                        if "bid" in k or "ask" in k or "price" in k
+                    ])
                 result.update({
                     "success": True,
                     "elapsed_seconds": round(elapsed, 2),
                     "markets_returned": len(markets),
-                    "first_market": markets[0] if markets else None,
+                    "first_market_raw": first_raw,
+                    "first_market_normalized": first_normalized,
+                    "price_keys_found": price_keys,
                     "cursor": data.get("cursor", ""),
                 })
             except Exception as e:

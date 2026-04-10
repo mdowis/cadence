@@ -7,6 +7,8 @@ from kalshi_arbitrage import (
     find_near_misses,
     kalshi_fee_per_contract,
     total_arb_fee,
+    normalize_market,
+    _parse_dollars_to_cents,
 )
 
 
@@ -171,6 +173,108 @@ def test_skips_missing_prices():
     assert len(opps) == 0
 
 
+# ---------------------------------------------------------------------------
+# Kalshi fixed-point migration: new _dollars field normalization
+# ---------------------------------------------------------------------------
+
+def test_parse_dollars_basic():
+    assert _parse_dollars_to_cents("0.6500") == 65
+    assert _parse_dollars_to_cents("0.05") == 5
+    assert _parse_dollars_to_cents("0.99") == 99
+    assert _parse_dollars_to_cents("1.00") == 100
+    assert _parse_dollars_to_cents("0.00") == 0
+
+
+def test_parse_dollars_subpenny_rounds():
+    """Subpenny prices round to nearest cent."""
+    assert _parse_dollars_to_cents("0.504") == 50
+    assert _parse_dollars_to_cents("0.506") == 51
+    assert _parse_dollars_to_cents("0.5051") == 51
+
+
+def test_parse_dollars_invalid():
+    assert _parse_dollars_to_cents(None) is None
+    assert _parse_dollars_to_cents("") is None
+    assert _parse_dollars_to_cents("not a number") is None
+
+
+def test_normalize_new_format_only():
+    """Post-migration: only *_dollars fields exist, no legacy cents."""
+    raw = {
+        "ticker": "BTC-100K",
+        "title": "Bitcoin above $100K",
+        "event_ticker": "BTC",
+        "yes_bid_dollars": "0.4500",
+        "yes_ask_dollars": "0.4700",
+        "no_bid_dollars": "0.5200",
+        "no_ask_dollars": "0.5400",
+        "last_price_dollars": "0.4600",
+    }
+    m = normalize_market(raw)
+    assert m["yes_bid"] == 45
+    assert m["yes_ask"] == 47
+    assert m["no_bid"] == 52
+    assert m["no_ask"] == 54
+    assert m["last_price"] == 46
+
+
+def test_normalize_legacy_format_untouched():
+    """Pre-migration: legacy cents fields preserved, not overwritten."""
+    raw = {
+        "ticker": "OLD",
+        "yes_ask": 47,
+        "no_ask": 48,
+        "yes_bid": 45,
+        "no_bid": 46,
+    }
+    m = normalize_market(raw)
+    assert m["yes_ask"] == 47
+    assert m["no_ask"] == 48
+    assert m["yes_bid"] == 45
+    assert m["no_bid"] == 46
+
+
+def test_normalize_mixed_format():
+    """If cents field is None but dollars field is present, use dollars."""
+    raw = {
+        "ticker": "MIX",
+        "yes_ask": None,
+        "yes_ask_dollars": "0.3300",
+    }
+    m = normalize_market(raw)
+    assert m["yes_ask"] == 33
+
+
+def test_normalize_feeds_detection():
+    """End-to-end: normalized markets should find arbs post-migration."""
+    raw_markets = [
+        {  # 47 + 48 = 95 < 100 → 5c arb
+            "ticker": "T1", "title": "Test", "event_ticker": "E1",
+            "event_title": "Ev",
+            "yes_ask_dollars": "0.4700",
+            "no_ask_dollars": "0.4800",
+        },
+    ]
+    normalized = [normalize_market(m) for m in raw_markets]
+    opps = find_binary_arbitrage(normalized, min_profit=0)
+    assert len(opps) == 1
+    assert opps[0].profit_cents == 5
+
+
+def test_normalize_feeds_near_miss():
+    raw_markets = [
+        {  # 51 + 50 = 101 → 1c near miss
+            "ticker": "T1", "title": "Test",
+            "yes_ask_dollars": "0.5100",
+            "no_ask_dollars": "0.5000",
+        },
+    ]
+    normalized = [normalize_market(m) for m in raw_markets]
+    near = find_near_misses(normalized, threshold=3)
+    assert len(near) == 1
+    assert near[0][0] == 101
+
+
 if __name__ == "__main__":
     test_fee_at_50_cents()
     test_fee_at_extremes()
@@ -186,4 +290,12 @@ if __name__ == "__main__":
     test_multi_outcome_no_arb_when_efficient()
     test_near_misses()
     test_skips_missing_prices()
-    print("All 14 tests passed!")
+    test_parse_dollars_basic()
+    test_parse_dollars_subpenny_rounds()
+    test_parse_dollars_invalid()
+    test_normalize_new_format_only()
+    test_normalize_legacy_format_untouched()
+    test_normalize_mixed_format()
+    test_normalize_feeds_detection()
+    test_normalize_feeds_near_miss()
+    print("All 22 tests passed!")

@@ -897,9 +897,20 @@ async function testFetch() {
     const resp = await fetch('/api/test-fetch', {method: 'POST'});
     const d = await resp.json();
     if (d.success) {
+      const raw = d.first_market_raw || {};
+      const norm = d.first_market_normalized || {};
+      const priceKeys = (d.price_keys_found || []).join(', ') || '(none!)';
+      const normalizedPrices = [
+        norm.yes_ask ? `yes_ask=${norm.yes_ask}c` : null,
+        norm.no_ask ? `no_ask=${norm.no_ask}c` : null,
+        norm.yes_bid ? `yes_bid=${norm.yes_bid}c` : null,
+        norm.no_bid ? `no_bid=${norm.no_bid}c` : null,
+      ].filter(Boolean).join(', ') || '(all null!)';
       result.innerHTML = `<span style="color:var(--green)">SUCCESS</span> in ${d.elapsed_seconds}s
 Returned ${d.markets_returned} markets
-${d.first_market ? 'First: ' + esc(d.first_market.ticker) + ' — ' + esc(d.first_market.title || '') : ''}`;
+${raw.ticker ? 'First: ' + esc(raw.ticker) + ' — ' + esc(raw.title || '') : ''}
+Price fields in response: ${esc(priceKeys)}
+Normalized: ${esc(normalizedPrices)}`;
     } else {
       result.innerHTML = `<span style="color:var(--red)">FAILED</span>
 Type: ${esc(d.error_type || 'unknown')}

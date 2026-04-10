@@ -398,6 +398,66 @@ class ArbitrageOpportunity:
 # API Client
 # ---------------------------------------------------------------------------
 
+# Kalshi's Fixed-Point Migration (Jan-Mar 2026):
+#   The integer cents price fields (yes_bid, yes_ask, no_bid, no_ask,
+#   last_price, liquidity, etc.) were deprecated on 2026-01-15 and REMOVED
+#   on 2026-03-05. Responses now contain *_dollars fields as decimal strings
+#   (e.g. "yes_ask_dollars": "0.6500"). Cadence normalizes these back into
+#   integer cents so the rest of the codebase keeps working.
+#
+# See: https://docs.kalshi.com/getting_started/fixed_point_migration
+
+_PRICE_FIELD_MAP = [
+    ("yes_bid",        "yes_bid_dollars"),
+    ("yes_ask",        "yes_ask_dollars"),
+    ("no_bid",         "no_bid_dollars"),
+    ("no_ask",         "no_ask_dollars"),
+    ("last_price",     "last_price_dollars"),
+    ("previous_yes_bid",  "previous_yes_bid_dollars"),
+    ("previous_yes_ask",  "previous_yes_ask_dollars"),
+    ("previous_price",    "previous_price_dollars"),
+    ("liquidity",      "liquidity_dollars"),
+]
+
+
+def _parse_dollars_to_cents(value):
+    """
+    Parse a Kalshi dollar string like "0.6500" to integer cents.
+
+    Returns None if the value is missing, empty, or unparseable.
+    Subpenny prices are rounded to the nearest whole cent.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        dollars = float(value)
+    except (ValueError, TypeError):
+        return None
+    return round(dollars * 100)
+
+
+def normalize_market(m):
+    """
+    Normalize a Kalshi market dict so the rest of the codebase can read
+    `yes_ask`, `no_ask`, etc. as integer cents regardless of which API
+    format the market was returned in.
+
+    Populates each legacy cents field from its *_dollars counterpart if
+    the cents field is missing. Leaves explicit cent values untouched
+    (so pre-migration snapshots and demo data still work).
+
+    Mutates and returns `m`.
+    """
+    if not isinstance(m, dict):
+        return m
+    for cents_field, dollars_field in _PRICE_FIELD_MAP:
+        if m.get(cents_field) is None and dollars_field in m:
+            parsed = _parse_dollars_to_cents(m[dollars_field])
+            if parsed is not None:
+                m[cents_field] = parsed
+    return m
+
+
 class KalshiClient:
     """
     Kalshi API client supporting authenticated and unauthenticated access.
@@ -542,6 +602,7 @@ class KalshiClient:
         seen_tickers = set()
         cursor = None
         t_start = time.time()
+        logged_first_sample = False
 
         for page in range(self.MAX_PAGES):
             data = self.get_markets(limit=1000, cursor=cursor, status=status)
@@ -549,13 +610,24 @@ class KalshiClient:
             if not markets:
                 break
 
-            # Count how many are actually new
+            # Log the raw keys of the first market on the first page so we
+            # can detect future API field renames immediately.
+            if not logged_first_sample and markets:
+                sample = markets[0]
+                price_keys = [k for k in sample.keys()
+                              if "bid" in k or "ask" in k or "price" in k]
+                print(f"  [scanner] first market ticker={sample.get('ticker')}, "
+                      f"price fields: {sorted(price_keys)}", flush=True)
+                logged_first_sample = True
+
+            # Normalize each market (populate legacy cents fields from
+            # new *_dollars fields if needed) and dedupe by ticker.
             new_count = 0
-            for m in markets:
-                ticker = m.get("ticker")
+            for raw in markets:
+                ticker = raw.get("ticker")
                 if ticker and ticker not in seen_tickers:
                     seen_tickers.add(ticker)
-                    all_markets.append(m)
+                    all_markets.append(normalize_market(raw))
                     new_count += 1
 
             # Progressive update: let the caller show partial results
@@ -568,8 +640,12 @@ class KalshiClient:
             # Progress log (periodic, not every page)
             if (page + 1) % self.PROGRESS_EVERY == 0:
                 elapsed = time.time() - t_start
+                # How many markets have both sides quoted?
+                quoted = sum(1 for m in all_markets
+                             if m.get("yes_ask") and m.get("no_ask"))
                 print(f"  [scanner] page {page + 1}: {len(all_markets)} unique "
-                      f"markets in {elapsed:.1f}s", flush=True)
+                      f"markets ({quoted} with both sides quoted) in {elapsed:.1f}s",
+                      flush=True)
 
             # If the page returned only duplicates, pagination is looping
             if new_count == 0:
