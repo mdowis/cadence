@@ -313,6 +313,39 @@ Optional: `CADENCE_TELEGRAM_STATUS_INTERVAL=3600` controls the periodic status i
 
 All Telegram calls run in a background thread so slow network to Telegram never blocks the scanner or executor. Failed sends are logged and retried with exponential backoff on 5xx; 4xx failures (bad token, bad chat id) fail fast.
 
+### Remote commands (opt-in)
+
+By default the bot only sends notifications. To also **receive** commands from Telegram, add:
+
+```bash
+CADENCE_TELEGRAM_COMMANDS_ENABLED=true
+```
+
+With commands enabled you can message the bot and remotely control Cadence:
+
+| Command | Effect |
+|---|---|
+| `/help` | List all available commands |
+| `/status` | Equity, daily P&L, drawdown, exposure, scanner/executor state |
+| `/positions` | Current open positions from Kalshi |
+| `/decisions` | Last 10 executor decisions with skip reasons |
+| `/config` | Current risk config: drawdown limit, per-trade cap, daily loss cap |
+| `/kill` | **Halt all trading immediately** (no confirmation) |
+| `/resume` | Deactivate kill switch, resume trading |
+| `/reset` | Reset daily P&L and baseline to current equity |
+| `/scanner_start` / `/scanner_stop` | Control the scanner thread |
+| `/exec_start` | Start auto-executor in **dry run** (no real orders) |
+| `/exec_stop` | Stop auto-executor |
+| `/exec_live` | Start auto-executor in **LIVE mode** — requires `CONFIRM` reply within 30s |
+
+Security model:
+- **Chat ID allowlist**: messages from anyone but your configured `CADENCE_TELEGRAM_CHAT_ID` are silently dropped. No reply, no log of their ID.
+- **Opt-in**: you must explicitly set `CADENCE_TELEGRAM_COMMANDS_ENABLED=true`. Without it the bot only sends, never reads.
+- **Confirmation for live trading**: `/exec_live` requires a two-step handshake. After the command, the bot asks you to reply `CONFIRM` or `YES` within 30 seconds. Anything else (including `/exec_live` again) cancels.
+- **Boot-time skip**: commands queued in Telegram from before the bot started up are skipped, so restarting won't replay old `/kill` commands.
+
+Kill switch does **not** require confirmation — it's a panic button. Better to accidentally halt than accidentally trade.
+
 ## Testing
 
 ```bash
@@ -321,7 +354,7 @@ python test_risk_manager.py    # 36 tests: kill switch, drawdown, balance sync, 
 python test_signer.py          #  6 tests: RSA-PSS signature round trip
 python test_dashboard.py       #  1 test:  JS syntax check
 python test_executor.py        # 21 tests: order body, fill parsing, unwind, safety
-python test_notifier.py        # 11 tests: Telegram queue, dedup, retries, format
+python test_notifier.py        # 22 tests: Telegram queue, dedup, retries, format, commands
 ```
 
 ## Project Structure

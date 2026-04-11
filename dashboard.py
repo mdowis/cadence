@@ -496,6 +496,201 @@ def build_diagnostics():
 
 
 # ---------------------------------------------------------------------------
+# Telegram command handlers
+# ---------------------------------------------------------------------------
+#
+# Each handler takes a list of string args and returns a string reply
+# (or "" / None to suppress the reply). They read/write state via the
+# module-level _risk_mgr, _trader, _process_ctrl, and _notifier globals.
+
+def _fmt_dollars(cents):
+    try:
+        return f"${cents / 100:.2f}"
+    except Exception:
+        return "?"
+
+
+def cmd_help(args):
+    if not _notifier:
+        return "Telegram not initialized."
+    cmds = _notifier.registered_commands()
+    lines = ["*Cadence commands*"]
+    for name in sorted(cmds.keys()):
+        lines.append(f"/{name} - {cmds[name]}")
+    return "\n".join(lines)
+
+
+def cmd_status(args):
+    if not _risk_mgr or not _process_ctrl:
+        return "System not ready."
+    r = _risk_mgr.get_status()
+    p = _process_ctrl.get_status()
+    pnl = r["daily_pnl_cents"]
+    pnl_sign = "+" if pnl >= 0 else ""
+    lines = [
+        "*Status*",
+        f"Equity: `{_fmt_dollars(r['equity_cents'])}`",
+        f"Cash: `{_fmt_dollars(r['cash_balance_cents'])}`",
+        f"Daily P&L: `{pnl_sign}{pnl}c`",
+        f"Drawdown: `{r['drawdown_pct']}%`",
+        f"Exposure: `{_fmt_dollars(r['total_exposure_cents'])}`",
+        f"Open positions: `{r['open_position_count']}`",
+        f"Trades today: `{r['daily_trade_count']}`",
+        f"Scanner: `{p['scanner']['status']}`",
+        f"Executor: `{p['executor']['status']}` "
+        f"({'DRY RUN' if p['config']['dry_run'] else 'LIVE'})",
+        f"Kill switch: `{'ACTIVE' if r['kill_switch_active'] else 'off'}`",
+    ]
+    return "\n".join(lines)
+
+
+def cmd_positions(args):
+    if not _trader:
+        return "Trader not initialized."
+    try:
+        resp = _trader.get_positions()
+        positions = (resp.get("market_positions") or resp.get("positions")
+                     or [])[:20]
+    except Exception as e:
+        return f"Failed to fetch positions: `{e}`"
+    if not positions:
+        return "No open positions."
+    lines = ["*Open Positions*"]
+    for p in positions:
+        ticker = p.get("ticker", "?")
+        qty = p.get("position") or p.get("quantity") or "?"
+        lines.append(f"`{ticker}` x{qty}")
+    return "\n".join(lines)
+
+
+def cmd_decisions(args):
+    if not _process_ctrl:
+        return "Process controller not initialized."
+    decisions = _process_ctrl.executor_status.recent_decisions[:10]
+    if not decisions:
+        return "No executor decisions yet."
+    lines = ["*Recent executor decisions*"]
+    for d in decisions:
+        mark = "+" if d["success"] else ("x" if d["attempted"] else "-")
+        ticker = d["event_ticker"][:20]
+        profit = f"{d['net_profit_cents']:.0f}c"
+        detail = d["detail"][:40]
+        lines.append(f"`{mark} {ticker} {profit} {detail}`")
+    return "\n".join(lines)
+
+
+def cmd_config(args):
+    if not _risk_mgr:
+        return "Risk manager not initialized."
+    s = _risk_mgr.get_status()
+    c = s["config"]
+    lines = [
+        "*Risk config*",
+        f"Max drawdown: `{c['max_drawdown_pct']}%`",
+        f"Max per trade: `{_fmt_dollars(s['effective_per_trade_limit_cents'] or 0)}` "
+        f"({s['per_trade_limit_basis']})",
+        f"Daily loss limit: `{_fmt_dollars(s['effective_daily_loss_limit_cents'] or 0)}` "
+        f"({s['daily_loss_limit_basis']})",
+        f"Max exposure: `{_fmt_dollars(c['max_total_exposure_cents'])}`",
+        f"Min profit: `{c['min_net_profit_cents']}c`",
+        f"Min ROI: `{c['min_roi_pct']}%`",
+    ]
+    return "\n".join(lines)
+
+
+def cmd_kill(args):
+    if not _risk_mgr:
+        return "Risk manager not initialized."
+    if _risk_mgr.state.kill_switch_active:
+        return "Kill switch already active."
+    _risk_mgr.activate_kill_switch("Manual activation via Telegram")
+    return "Kill switch ACTIVATED. All trading halted."
+
+
+def cmd_resume(args):
+    if not _risk_mgr:
+        return "Risk manager not initialized."
+    if not _risk_mgr.state.kill_switch_active:
+        return "Kill switch was not active."
+    _risk_mgr.deactivate_kill_switch()
+    return "Kill switch deactivated. Trading can resume."
+
+
+def cmd_reset(args):
+    if not _risk_mgr:
+        return "Risk manager not initialized."
+    _risk_mgr.reset_daily()
+    return f"Daily P&L and baseline reset to current equity."
+
+
+def cmd_scanner_start(args):
+    if not _process_ctrl:
+        return "Process controller not initialized."
+    success, msg = _process_ctrl.start_scanner()
+    return f"Scanner: {msg}"
+
+
+def cmd_scanner_stop(args):
+    if not _process_ctrl:
+        return "Process controller not initialized."
+    success, msg = _process_ctrl.stop_scanner()
+    return f"Scanner: {msg}"
+
+
+def cmd_exec_start(args):
+    """Start executor in DRY RUN mode. No real money."""
+    if not _process_ctrl:
+        return "Process controller not initialized."
+    success, msg = _process_ctrl.start_executor(dry_run=True)
+    return f"Executor (DRY RUN): {msg}"
+
+
+def cmd_exec_stop(args):
+    if not _process_ctrl:
+        return "Process controller not initialized."
+    success, msg = _process_ctrl.stop_executor()
+    return f"Executor: {msg}"
+
+
+def cmd_exec_live(args):
+    """
+    Start executor in LIVE trading mode. Real money. Requires
+    confirmation: the user must reply CONFIRM within 30s.
+    """
+    if not _process_ctrl:
+        return "Process controller not initialized."
+
+    # Second step: the user replied CONFIRM
+    if "__confirmed__" in args:
+        success, msg = _process_ctrl.start_executor(dry_run=False)
+        return f"Executor (LIVE): {msg}"
+
+    # First step: store the pending confirmation
+    return _notifier.register_confirmation("exec_live") + (
+        "\n\n*WARNING*: this places REAL money trades."
+    )
+
+
+def register_telegram_commands():
+    """Register all command handlers with the notifier."""
+    if not _notifier or not _notifier.commands_enabled:
+        return
+    _notifier.register_command("help", cmd_help, "Show available commands")
+    _notifier.register_command("status", cmd_status, "Show equity, P&L, process status")
+    _notifier.register_command("positions", cmd_positions, "Show open Kalshi positions")
+    _notifier.register_command("decisions", cmd_decisions, "Recent executor decisions")
+    _notifier.register_command("config", cmd_config, "Show current risk config")
+    _notifier.register_command("kill", cmd_kill, "HALT all trading immediately")
+    _notifier.register_command("resume", cmd_resume, "Resume trading (deactivate kill switch)")
+    _notifier.register_command("reset", cmd_reset, "Reset daily P&L and baseline")
+    _notifier.register_command("scanner_start", cmd_scanner_start, "Start market scanner")
+    _notifier.register_command("scanner_stop", cmd_scanner_stop, "Stop market scanner")
+    _notifier.register_command("exec_start", cmd_exec_start, "Start executor (DRY RUN)")
+    _notifier.register_command("exec_stop", cmd_exec_stop, "Stop executor")
+    _notifier.register_command("exec_live", cmd_exec_live, "Start executor in LIVE mode (requires CONFIRM)")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -668,12 +863,14 @@ Then open http://localhost:8050
             print(f"  Scanner: auto-start failed - {msg}")
         print()
 
-    # Send startup Telegram notification
+    # Send startup Telegram notification and start command listener
     if _notifier and _notifier.enabled:
         _notifier.notify_startup(
             equity_cents=_risk_mgr.state.current_equity_cents,
             authenticated=authenticated,
         )
+        register_telegram_commands()
+        _notifier.start_command_listener()
 
     # 9. Start web server
     server = HTTPServer(("0.0.0.0", args.port), DashboardHandler)

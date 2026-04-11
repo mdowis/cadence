@@ -191,6 +191,208 @@ def monkeypatch_env(*args, **kwargs):
     return None
 
 
+# ---- Command handling ----
+
+def _quiet_notifier_send(notifier):
+    """Replace _send_now so the outbound queue never hits real urlopen."""
+    notifier._send_now = lambda text, parse_mode: None
+
+
+def _make_authorized_message(text, chat_id="42", update_id=1):
+    return {
+        "update_id": update_id,
+        "message": {
+            "chat": {"id": int(chat_id)},
+            "text": text,
+        },
+    }
+
+
+def test_command_disabled_by_default():
+    """commands_enabled must be explicit opt-in."""
+    n = TelegramNotifier(bot_token="tok", chat_id="42")
+    try:
+        assert n.commands_enabled is False
+    finally:
+        n.stop()
+
+
+def test_register_command():
+    n = TelegramNotifier(
+        bot_token="tok", chat_id="42", commands_enabled=True,
+    )
+    try:
+        n.register_command("ping", lambda args: "pong", "reply with pong")
+        assert "ping" in n.registered_commands()
+        assert n.registered_commands()["ping"] == "reply with pong"
+    finally:
+        n.stop()
+
+
+def test_handle_update_dispatches_command():
+    n = TelegramNotifier(
+        bot_token="tok", chat_id="42", commands_enabled=True,
+    )
+    _quiet_notifier_send(n)
+    try:
+        calls = []
+        n.register_command("status", lambda args: calls.append(args) or "ok")
+        n._handle_update(_make_authorized_message("/status"))
+        assert calls == [[]]
+    finally:
+        n.stop()
+
+
+def test_handle_update_passes_args():
+    n = TelegramNotifier(
+        bot_token="tok", chat_id="42", commands_enabled=True,
+    )
+    _quiet_notifier_send(n)
+    try:
+        captured = []
+        n.register_command("echo", lambda args: captured.append(args) or " ".join(args))
+        n._handle_update(_make_authorized_message("/echo hello world"))
+        assert captured == [["hello", "world"]]
+    finally:
+        n.stop()
+
+
+def test_handle_update_strips_bot_mention():
+    """/cmd@BotName args should dispatch to 'cmd'."""
+    n = TelegramNotifier(
+        bot_token="tok", chat_id="42", commands_enabled=True,
+    )
+    _quiet_notifier_send(n)
+    try:
+        fired = []
+        n.register_command("status", lambda args: fired.append(True))
+        n._handle_update(_make_authorized_message("/status@CadenceBot"))
+        assert fired == [True]
+    finally:
+        n.stop()
+
+
+def test_unauthorized_chat_silently_dropped():
+    """Messages from the wrong chat id must not dispatch commands."""
+    n = TelegramNotifier(
+        bot_token="tok", chat_id="42", commands_enabled=True,
+    )
+    _quiet_notifier_send(n)
+    try:
+        fired = []
+        n.register_command("kill", lambda args: fired.append(True))
+        # Attacker tries from a different chat
+        n._handle_update(_make_authorized_message("/kill", chat_id="999"))
+        assert fired == []
+    finally:
+        n.stop()
+
+
+def test_unknown_command_replies_help_hint():
+    n = TelegramNotifier(
+        bot_token="tok", chat_id="42", commands_enabled=True,
+    )
+    sends = []
+    n.send = lambda text, **kw: sends.append(text)
+    try:
+        n._handle_update(_make_authorized_message("/doesnotexist"))
+        assert any("Unknown command" in s for s in sends)
+    finally:
+        n.stop()
+
+
+def test_non_slash_message_ignored():
+    """Plain text (not CONFIRM) should be ignored silently."""
+    n = TelegramNotifier(
+        bot_token="tok", chat_id="42", commands_enabled=True,
+    )
+    sends = []
+    n.send = lambda text, **kw: sends.append(text)
+    fired = []
+    n.register_command("status", lambda args: fired.append(True))
+    try:
+        n._handle_update(_make_authorized_message("hello there"))
+        assert fired == []
+        assert sends == []
+    finally:
+        n.stop()
+
+
+def test_confirmation_flow():
+    """Two-step confirmation: first /cmd, then CONFIRM reply."""
+    n = TelegramNotifier(
+        bot_token="tok", chat_id="42", commands_enabled=True,
+    )
+    _quiet_notifier_send(n)
+    try:
+        executed = []
+
+        def handler(args):
+            if "__confirmed__" in args:
+                executed.append("yes")
+                return "LIVE trading started."
+            return n.register_confirmation("exec_live")
+
+        n.register_command("exec_live", handler, "start live trading")
+
+        # Step 1: /exec_live → pending
+        n._handle_update(_make_authorized_message("/exec_live", update_id=10))
+        assert executed == []
+        assert "exec_live" in n._pending_confirmations
+
+        # Step 2: CONFIRM → executes
+        n._handle_update(_make_authorized_message("CONFIRM", update_id=11))
+        assert executed == ["yes"]
+        assert "exec_live" not in n._pending_confirmations
+    finally:
+        n.stop()
+
+
+def test_confirmation_expires():
+    """Stale confirmations are cleaned up, not executed."""
+    n = TelegramNotifier(
+        bot_token="tok", chat_id="42", commands_enabled=True,
+    )
+    _quiet_notifier_send(n)
+    try:
+        executed = []
+        n.register_command(
+            "exec_live",
+            lambda args: executed.append(1) if "__confirmed__" in args
+                         else n.register_confirmation("exec_live"),
+        )
+        n._handle_update(_make_authorized_message("/exec_live", update_id=20))
+        # Force the pending timestamp into the past
+        ts, args = n._pending_confirmations["exec_live"]
+        n._pending_confirmations["exec_live"] = (
+            ts - n.CONFIRMATION_TTL_SECS - 1, args,
+        )
+        # Now the CONFIRM should NOT execute anything
+        sends = []
+        n.send = lambda text, **kw: sends.append(text)
+        n._handle_update(_make_authorized_message("CONFIRM", update_id=21))
+        assert executed == []
+        assert any("expired" in s.lower() or "nothing" in s.lower() for s in sends)
+    finally:
+        n.stop()
+
+
+def test_command_exception_is_caught_and_reported():
+    n = TelegramNotifier(
+        bot_token="tok", chat_id="42", commands_enabled=True,
+    )
+    sends = []
+    n.send = lambda text, **kw: sends.append(text)
+    try:
+        def broken(args):
+            raise ValueError("boom")
+        n.register_command("broken", broken)
+        n._handle_update(_make_authorized_message("/broken"))
+        assert any("failed" in s.lower() and "boom" in s for s in sends)
+    finally:
+        n.stop()
+
+
 if __name__ == "__main__":
     import os
     # Make sure env isn't set so build_from_env returns disabled
@@ -208,4 +410,15 @@ if __name__ == "__main__":
     test_http_400_does_not_retry_forever()
     test_escape_md_strips_special_chars()
     test_stats_reporting()
-    print("All 11 notifier tests passed!")
+    test_command_disabled_by_default()
+    test_register_command()
+    test_handle_update_dispatches_command()
+    test_handle_update_passes_args()
+    test_handle_update_strips_bot_mention()
+    test_unauthorized_chat_silently_dropped()
+    test_unknown_command_replies_help_hint()
+    test_non_slash_message_ignored()
+    test_confirmation_flow()
+    test_confirmation_expires()
+    test_command_exception_is_caught_and_reported()
+    print("All 22 notifier tests passed!")

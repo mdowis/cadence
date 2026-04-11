@@ -1,9 +1,13 @@
 """
 Telegram notifier for Cadence.
 
-Sends trade, risk, and status events to a Telegram chat. Runs in a
-background thread so slow Telegram API calls never block the scanner
-or executor.
+Sends trade, risk, and status events to a Telegram chat. Also supports
+receiving /commands back so you can remotely halt/resume trading, check
+status, and start or stop processes from your phone.
+
+Runs TWO background threads:
+  - _run() drains the outbound message queue (sendMessage)
+  - _command_loop() long-polls getUpdates and dispatches /commands
 
 Setup:
   1. Create a bot via @BotFather on Telegram, get the TOKEN
@@ -12,8 +16,10 @@ Setup:
   4. Set in .env:
        CADENCE_TELEGRAM_BOT_TOKEN=<token>
        CADENCE_TELEGRAM_CHAT_ID=<chat_id>
+       CADENCE_TELEGRAM_COMMANDS_ENABLED=true  (opt-in, default false)
 """
 
+import json
 import os
 import queue
 import threading
@@ -41,23 +47,53 @@ class TelegramNotifier:
     REQUEST_TIMEOUT_SECS = 10
     MAX_QUEUE = 200                 # drop oldest if queue is backed up
     MAX_RETRIES = 3
+    POLL_TIMEOUT_SECS = 25          # Telegram long-poll timeout
+    CONFIRMATION_TTL_SECS = 30      # /exec_live confirmation window
 
-    def __init__(self, bot_token=None, chat_id=None, enabled=True):
+    def __init__(self, bot_token=None, chat_id=None, enabled=True,
+                 commands_enabled=False):
         self.bot_token = bot_token
         self.chat_id = str(chat_id) if chat_id else None
         self.enabled = enabled and bool(bot_token) and bool(chat_id)
+        self.commands_enabled = commands_enabled and self.enabled
         self._queue = queue.Queue(maxsize=self.MAX_QUEUE)
         self._recent = {}  # {message_hash: last_send_time}
         self._recent_lock = threading.Lock()
         self._worker = None
+        self._command_thread = None
         self._stop = threading.Event()
         self._sent_count = 0
         self._failed_count = 0
         self._dropped_count = 0
 
+        # Command handling state
+        self._command_handlers = {}       # name -> (callable, description)
+        self._last_update_id = 0
+        self._pending_confirmations = {}  # name -> (timestamp, args)
+        self._commands_received = 0
+
         if self.enabled:
             self._worker = threading.Thread(target=self._run, daemon=True)
             self._worker.start()
+
+    def start_command_listener(self):
+        """
+        Start the long-polling command listener thread.
+
+        Must be called AFTER all commands are registered via
+        register_command(). Called by the dashboard's main() after it
+        wires up the handlers.
+        """
+        if not self.commands_enabled:
+            return
+        if self._command_thread and self._command_thread.is_alive():
+            return
+        self._command_thread = threading.Thread(
+            target=self._command_loop, daemon=True,
+        )
+        self._command_thread.start()
+        print(f"  [telegram] command listener started "
+              f"({len(self._command_handlers)} commands)", flush=True)
 
     def stop(self):
         """Signal the worker to stop after draining the queue."""
@@ -179,6 +215,173 @@ class TelegramNotifier:
         self.send("*Cadence stopping*")
 
     # ------------------------------------------------------------------
+    # Command registration and dispatch
+    # ------------------------------------------------------------------
+
+    def register_command(self, name, handler, description=""):
+        """
+        Register a /command handler.
+
+        handler signature: fn(args: List[str]) -> str
+        Returned string is sent back to the chat as a reply.
+        Return "" or None to suppress the reply.
+        """
+        self._command_handlers[name] = (handler, description)
+
+    def registered_commands(self):
+        """Return {name: description} for all registered commands."""
+        return {n: desc for n, (_, desc) in self._command_handlers.items()}
+
+    def _command_loop(self):
+        """Long-poll getUpdates and dispatch /commands from the authorized chat."""
+        # On startup, skip any updates that arrived while we were offline
+        # so old /commands don't fire at boot
+        try:
+            self._skip_pending_updates()
+        except Exception as e:
+            print(f"  [telegram] skip pending failed: {e}", flush=True)
+
+        while not self._stop.is_set():
+            try:
+                updates = self._get_updates()
+                for update in updates:
+                    if self._stop.is_set():
+                        break
+                    self._handle_update(update)
+            except Exception as e:
+                print(f"  [telegram] command loop error: {e}", flush=True)
+                # Back off on errors so we don't hammer the API
+                if self._stop.wait(5):
+                    break
+
+    def _skip_pending_updates(self):
+        """Advance offset past any updates that were pending when we started."""
+        url = f"{TELEGRAM_API_BASE}/bot{self.bot_token}/getUpdates?timeout=0&offset=-1"
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=self.REQUEST_TIMEOUT_SECS) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            results = body.get("result", [])
+            if results:
+                self._last_update_id = results[-1]["update_id"]
+
+    def _get_updates(self):
+        """Long-poll Telegram for new messages."""
+        params = {
+            "timeout": self.POLL_TIMEOUT_SECS,
+            "offset": self._last_update_id + 1,
+            "allowed_updates": json.dumps(["message"]),
+        }
+        url = (f"{TELEGRAM_API_BASE}/bot{self.bot_token}/getUpdates?"
+               f"{urllib.parse.urlencode(params)}")
+        req = urllib.request.Request(url, method="GET")
+        try:
+            with urllib.request.urlopen(
+                req, timeout=self.POLL_TIMEOUT_SECS + 5,
+            ) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.URLError:
+            return []
+        except (TimeoutError, OSError):
+            return []
+        if not body.get("ok"):
+            return []
+        return body.get("result", [])
+
+    def _handle_update(self, update):
+        self._last_update_id = max(self._last_update_id, update.get("update_id", 0))
+        message = update.get("message") or {}
+        chat = message.get("chat") or {}
+        chat_id = str(chat.get("id", ""))
+        text = (message.get("text") or "").strip()
+
+        # Access control: ONLY accept messages from the configured chat_id.
+        # Silent drop on unauthorized senders — don't reply, don't log the id.
+        if chat_id != self.chat_id:
+            return
+
+        if not text:
+            return
+
+        self._commands_received += 1
+
+        # Handle pending confirmations (reply "CONFIRM" or "YES")
+        if text.upper() in ("CONFIRM", "YES"):
+            self._handle_confirmation()
+            return
+
+        # Only /commands from here on
+        if not text.startswith("/"):
+            return
+
+        # Parse: "/cmd arg1 arg2" or "/cmd@BotName arg1 arg2"
+        parts = text.split()
+        cmd = parts[0][1:].lower()
+        if "@" in cmd:
+            cmd = cmd.split("@", 1)[0]
+        args = parts[1:]
+
+        entry = self._command_handlers.get(cmd)
+        if not entry:
+            self.send(f"Unknown command `/{cmd}`. Try /help")
+            return
+
+        handler, _desc = entry
+        try:
+            response = handler(args)
+        except Exception as e:
+            self.send(f"Command `/{cmd}` failed: `{_escape_md(str(e))}`")
+            return
+
+        if response:
+            self.send(response)
+
+    def register_confirmation(self, name, args=None):
+        """
+        Store a pending confirmation so that a follow-up CONFIRM/YES message
+        can trigger it within CONFIRMATION_TTL_SECS.
+
+        Returns the display string the handler should return to the user.
+        """
+        self._pending_confirmations[name] = (time.time(), args or [])
+        return (f"*Confirmation required*\n"
+                f"Reply `CONFIRM` or `YES` within {self.CONFIRMATION_TTL_SECS}s "
+                f"to proceed with `/{name}`.")
+
+    def _handle_confirmation(self):
+        """Process a CONFIRM/YES reply against any pending confirmation."""
+        now = time.time()
+        # Garbage-collect expired confirmations
+        expired = [
+            name for name, (ts, _) in self._pending_confirmations.items()
+            if now - ts > self.CONFIRMATION_TTL_SECS
+        ]
+        for name in expired:
+            del self._pending_confirmations[name]
+
+        if not self._pending_confirmations:
+            self.send("Nothing to confirm (or confirmation expired).")
+            return
+
+        # Take the most recent pending confirmation
+        name, (ts, args) = max(
+            self._pending_confirmations.items(), key=lambda x: x[1][0]
+        )
+        del self._pending_confirmations[name]
+
+        entry = self._command_handlers.get(name)
+        if not entry:
+            self.send(f"Handler for `/{name}` is gone, aborting.")
+            return
+        handler, _ = entry
+        try:
+            response = handler(args + ["__confirmed__"])
+        except Exception as e:
+            self.send(f"Confirmation failed: `{_escape_md(str(e))}`")
+            return
+        if response:
+            self.send(response)
+
+    # ------------------------------------------------------------------
     # Worker loop
     # ------------------------------------------------------------------
 
@@ -244,6 +447,9 @@ class TelegramNotifier:
     def get_stats(self):
         return {
             "enabled": self.enabled,
+            "commands_enabled": self.commands_enabled,
+            "commands_registered": len(self._command_handlers),
+            "commands_received": self._commands_received,
             "queued": self._queue.qsize() if self.enabled else 0,
             "sent": self._sent_count,
             "failed": self._failed_count,
@@ -273,6 +479,14 @@ def build_from_env():
     chat_id = os.environ.get("CADENCE_TELEGRAM_CHAT_ID", "").strip()
     enabled_str = os.environ.get("CADENCE_TELEGRAM_ENABLED", "true").lower()
     enabled = enabled_str in ("true", "1", "yes", "on")
+    commands_str = os.environ.get(
+        "CADENCE_TELEGRAM_COMMANDS_ENABLED", "false"
+    ).lower()
+    commands_enabled = commands_str in ("true", "1", "yes", "on")
+
     if not token or not chat_id:
         return TelegramNotifier(enabled=False)
-    return TelegramNotifier(bot_token=token, chat_id=chat_id, enabled=enabled)
+    return TelegramNotifier(
+        bot_token=token, chat_id=chat_id,
+        enabled=enabled, commands_enabled=commands_enabled,
+    )
