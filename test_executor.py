@@ -151,13 +151,20 @@ class FakeTrader:
     hitting the real Kalshi API.
     """
     def __init__(self, batch_response=None, positions_response=None,
-                 raise_on_batch=False):
+                 orderbook_response=None, raise_on_batch=False):
         self.authenticated = True
         self.base_url = "https://fake"
         self.calls = []
         self.unwind_calls = []
         self.batch_response = batch_response or {"orders": []}
         self.positions_response = positions_response or {"positions": []}
+        # Default orderbook: yes bid at 40c, no bid at 40c
+        self.orderbook_response = orderbook_response or {
+            "orderbook_fp": {
+                "yes_dollars": [["0.4000", "5.00"]],
+                "no_dollars": [["0.4000", "5.00"]],
+            }
+        }
         self.raise_on_batch = raise_on_batch
 
     def batch_create_orders(self, orders):
@@ -177,12 +184,16 @@ class FakeTrader:
     def get_balance(self):
         return {"balance": 10000}
 
+    def get_orderbook(self, ticker):
+        return self.orderbook_response
+
     def _request(self, method, url, json=None):
         self.unwind_calls.append(json)
         return {"order": {"status": "executed"}}
 
 
-def _make_binary_opp(yes_ask=47, no_ask=48, event="EVT", ticker="T1"):
+def _make_binary_opp(yes_ask=40, no_ask=50, event="EVT", ticker="T1"):
+    """Default: 40c + 50c = 90c cost → 10c gross, well above 5c min."""
     return ArbitrageOpportunity(
         type="binary",
         event_title="Test",
@@ -192,28 +203,29 @@ def _make_binary_opp(yes_ask=47, no_ask=48, event="EVT", ticker="T1"):
         total_cost=yes_ask + no_ask,
         guaranteed_payout=100,
         profit_cents=100 - yes_ask - no_ask,
-        roi_percent=5,
+        roi_percent=20,
         fee_cents=2,
         net_profit_cents=100 - yes_ask - no_ask - 2,
     )
 
 
 def _make_multi_opp():
+    """Multi-outcome YES arb, well above 5c min profit."""
     return ArbitrageOpportunity(
         type="multi_outcome_under (buy all YES)",
         event_title="Test",
         event_ticker="MULTI",
         markets=[
-            {"ticker": "A", "title": "a", "yes_ask": 30},
-            {"ticker": "B", "title": "b", "yes_ask": 25},
+            {"ticker": "A", "title": "a", "yes_ask": 20},
+            {"ticker": "B", "title": "b", "yes_ask": 20},
             {"ticker": "C", "title": "c", "yes_ask": 20},
         ],
-        total_cost=75,
+        total_cost=60,
         guaranteed_payout=100,
-        profit_cents=25,
-        roi_percent=33,
-        fee_cents=2,
-        net_profit_cents=23,
+        profit_cents=40,
+        roi_percent=66,
+        fee_cents=3,
+        net_profit_cents=37,
     )
 
 
@@ -304,7 +316,7 @@ def test_partial_fill_triggers_unwind():
             {"order": {"status": "cancelled"}},
         ]
     })
-    opp = _make_binary_opp()
+    opp = _make_binary_opp()  # yes_ask=40, no_ask=50
     success, detail = execute_opportunity(
         trader, rm, opp, contracts=1, dry_run=False,
     )
@@ -314,8 +326,65 @@ def test_partial_fill_triggers_unwind():
     assert len(trader.unwind_calls) == 1
     unwind = trader.unwind_calls[0]
     assert unwind["action"] == "sell"
+    assert unwind["side"] == "yes"  # we filled the yes leg
+    # CRITICAL: unwind price must match the real best bid from the
+    # orderbook (40c default in FakeTrader), NOT 1c
+    assert unwind["yes_price_dollars"] == "0.4000"
     # Exposure should NOT be recorded for partial fills
     assert rm.state.total_exposure_cents == 0
+
+
+def test_unwind_uses_best_bid_from_orderbook():
+    """Verify unwind fetches the actual orderbook and uses the top bid."""
+    rm = RiskManager(starting_equity_cents=100000)
+    trader = FakeTrader(
+        batch_response={
+            "orders": [
+                {"order": {"status": "executed", "filled_quantity": 2}},
+                {"order": {"status": "cancelled"}},
+            ]
+        },
+        orderbook_response={
+            "orderbook_fp": {
+                "yes_dollars": [
+                    ["0.3200", "10.00"],
+                    ["0.3500", "5.00"],   # highest bid, should be picked
+                    ["0.3000", "20.00"],
+                ],
+                "no_dollars": [["0.6000", "10.00"]],
+            }
+        },
+    )
+    opp = _make_binary_opp()
+    execute_opportunity(trader, rm, opp, contracts=2, dry_run=False)
+    assert len(trader.unwind_calls) == 1
+    unwind = trader.unwind_calls[0]
+    # Must pick the MAX bid across all levels, not just the first one
+    assert unwind["yes_price_dollars"] == "0.3500"
+    assert unwind["count"] == 2
+
+
+def test_unwind_fails_when_no_bids_trips_kill_switch():
+    """If no bids exist, unwind can't execute → kill switch trips."""
+    rm = RiskManager(starting_equity_cents=100000)
+    trader = FakeTrader(
+        batch_response={
+            "orders": [
+                {"order": {"status": "executed", "filled_quantity": 1}},
+                {"order": {"status": "cancelled"}},
+            ]
+        },
+        orderbook_response={
+            "orderbook_fp": {"yes_dollars": [], "no_dollars": []}
+        },
+    )
+    opp = _make_binary_opp()
+    success, detail = execute_opportunity(
+        trader, rm, opp, contracts=1, dry_run=False,
+    )
+    assert not success
+    assert "KILL SWITCH" in detail or "kill" in detail.lower()
+    assert rm.state.kill_switch_active
 
 
 def test_full_fill_records_exposure():
@@ -327,13 +396,13 @@ def test_full_fill_records_exposure():
             {"order": {"status": "executed", "filled_quantity": 1}},
         ]
     })
-    opp = _make_binary_opp(yes_ask=47, no_ask=48)
+    opp = _make_binary_opp(yes_ask=40, no_ask=50)
     success, detail = execute_opportunity(
         trader, rm, opp, contracts=1, dry_run=False,
     )
     assert success
     # Exposure tracked = full cost of the arb
-    assert rm.state.total_exposure_cents == 95
+    assert rm.state.total_exposure_cents == 90
     # No unwind calls
     assert len(trader.unwind_calls) == 0
 
@@ -399,8 +468,10 @@ if __name__ == "__main__":
     test_multi_leg_allowed_when_opted_in()
     test_zero_fills_returns_failure()
     test_partial_fill_triggers_unwind()
+    test_unwind_uses_best_bid_from_orderbook()
+    test_unwind_fails_when_no_bids_trips_kill_switch()
     test_full_fill_records_exposure()
     test_http_error_does_not_track_exposure()
     test_risk_block_prevents_order()
     test_kill_switch_blocks_even_in_dry_run()
-    print("All 19 executor tests passed!")
+    print("All 21 executor tests passed!")

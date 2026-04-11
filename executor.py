@@ -231,11 +231,68 @@ def _parse_order_status(order_result):
     return order.get("status", "unknown"), order
 
 
+def _best_bid_cents(trader, ticker, side):
+    """
+    Fetch the best bid for selling `side` on this ticker.
+
+    Kalshi's orderbook only lists BIDS for both yes and no sides. To sell
+    YES we need the highest YES bid. To sell NO we need the highest NO bid.
+
+    Returns (price_cents, source) where source is a string for logging,
+    or (None, reason) if no bid is available.
+    """
+    try:
+        resp = trader.get_orderbook(ticker)
+    except Exception as e:
+        return None, f"orderbook fetch failed: {e}"
+
+    # Post-migration: orderbook_fp with yes_dollars/no_dollars
+    # Pre-migration: orderbook with yes/no as integer cents
+    book = resp.get("orderbook_fp") or resp.get("orderbook") or {}
+
+    if "orderbook_fp" in resp or f"{side}_dollars" in book:
+        levels = book.get(f"{side}_dollars") or book.get(side) or []
+    else:
+        levels = book.get(side) or []
+
+    if not levels:
+        return None, f"no {side} bids in orderbook"
+
+    # Each level is [price, quantity]. Price may be string dollars or int cents.
+    # Take the max across all levels regardless of sort order.
+    best = None
+    for lvl in levels:
+        if not isinstance(lvl, (list, tuple)) or not lvl:
+            continue
+        price = lvl[0]
+        if isinstance(price, str):
+            try:
+                cents = round(float(price) * 100)
+            except (ValueError, TypeError):
+                continue
+        elif isinstance(price, (int, float)):
+            # Legacy format: integer cents
+            cents = int(price)
+        else:
+            continue
+        if best is None or cents > best:
+            best = cents
+
+    if best is None:
+        return None, f"no parseable {side} bid prices"
+    return best, f"best {side} bid"
+
+
 def _unwind_filled_legs(trader, orders, result, risk_mgr):
     """
     Partial fill safety: if some legs filled but not all, immediately
     place OPPOSING orders to close the filled legs. This prevents
     naked directional exposure after a failed multi-leg arb.
+
+    Unwind strategy:
+      1. Fetch the live orderbook for the market
+      2. Sell at the best bid price (guaranteed fill at that price)
+      3. If no bid exists, fail loudly — the kill switch will trip
 
     Returns (unwound_count, errors).
     """
@@ -259,35 +316,55 @@ def _unwind_filled_legs(trader, orders, result, risk_mgr):
         if filled_qty <= 0:
             continue
 
-        # Build opposing sell order: same side, opposite action
+        ticker = original["ticker"]
+        side = original["side"]
+
+        # Find the real price we can sell at right now
+        bid_cents, source = _best_bid_cents(trader, ticker, side)
+        if bid_cents is None:
+            err = f"Cannot unwind {ticker}: {source}"
+            print(f"    [UNWIND] ERROR: {err}", flush=True)
+            errors.append(err)
+            continue
+
+        # Compare to what we paid on the filling leg so we can log the loss
+        paid_dollars = original.get(f"{side}_price_dollars", "?")
+        try:
+            paid_cents = round(float(paid_dollars) * 100)
+            loss_per_contract = paid_cents - bid_cents
+        except (ValueError, TypeError):
+            paid_cents = None
+            loss_per_contract = None
+
         unwind = {
-            "ticker": original["ticker"],
-            "side": original["side"],
+            "ticker": ticker,
+            "side": side,
             "action": "sell",  # close the long position
             "count": filled_qty,
+            f"{side}_price_dollars": _cents_to_dollars_str(bid_cents),
             "time_in_force": TIF_IOC,
             "client_order_id": f"unwind-{uuid.uuid4()}",
         }
-        # Sell at market by not specifying a price, OR at a price
-        # that's guaranteed to cross the book (1 cent for aggressive sell)
-        if "yes_price_dollars" in original:
-            unwind["yes_price_dollars"] = "0.0100"  # aggressive sell
-        else:
-            unwind["no_price_dollars"] = "0.0100"
 
         try:
-            print(f"    [UNWIND] Selling {filled_qty} {original['side']} "
-                  f"on {original['ticker']}", flush=True)
+            loss_str = f", est loss {loss_per_contract}c/contract" \
+                if loss_per_contract is not None else ""
+            print(f"    [UNWIND] Selling {filled_qty} {side} on {ticker} "
+                  f"at {bid_cents}c (paid {paid_cents}c{loss_str})", flush=True)
             trader._request("POST", f"{trader.base_url}/portfolio/orders",
                             json=unwind)
             unwound += 1
             if risk_mgr:
+                total_loss = (loss_per_contract * filled_qty
+                              if loss_per_contract is not None else None)
                 risk_mgr._log_risk_event(
                     "partial_fill_unwind",
-                    f"Unwound {filled_qty} {original['side']} on {original['ticker']}"
+                    f"Unwound {filled_qty} {side} on {ticker} at {bid_cents}c "
+                    f"(loss: {total_loss}c)" if total_loss is not None
+                    else f"Unwound {filled_qty} {side} on {ticker} at {bid_cents}c"
                 )
         except Exception as e:
-            err = f"Failed to unwind {original['ticker']}: {e}"
+            err = f"Failed to unwind {ticker}: {e}"
             print(f"    [UNWIND] ERROR: {err}", flush=True)
             errors.append(err)
 
