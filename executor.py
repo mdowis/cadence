@@ -214,27 +214,150 @@ def build_orders_for_opportunity(opp, contracts=1):
     return orders
 
 
-def execute_opportunity(trader, risk_mgr, opp, contracts=1, dry_run=False):
+# Fill statuses that mean "order actually traded contracts"
+# "resting" means the order is sitting on the book - NOT filled. For IOC
+# orders resting shouldn't happen; only executed counts.
+FILLED_STATUSES = {"executed"}
+
+
+def _parse_order_status(order_result):
     """
-    Full execution pipeline for one opportunity:
-    1. Risk check
-    2. Build orders
-    3. Submit via batch API (or log in dry-run mode)
-    4. Record trade in risk manager
+    Extract the status string from a Kalshi order response.
+
+    Kalshi wraps the order under an 'order' key in some responses,
+    returns it flat in others.
+    """
+    order = order_result.get("order", order_result)
+    return order.get("status", "unknown"), order
+
+
+def _unwind_filled_legs(trader, orders, result, risk_mgr):
+    """
+    Partial fill safety: if some legs filled but not all, immediately
+    place OPPOSING orders to close the filled legs. This prevents
+    naked directional exposure after a failed multi-leg arb.
+
+    Returns (unwound_count, errors).
+    """
+    unwound = 0
+    errors = []
+    order_results = result.get("orders", [])
+
+    for i, order_result in enumerate(order_results):
+        if i >= len(orders):
+            continue
+        original = orders[i]
+        status, order_data = _parse_order_status(order_result)
+
+        # Only unwind legs that actually filled
+        if status not in FILLED_STATUSES:
+            continue
+
+        filled_qty = int(order_data.get("filled_quantity") or
+                         order_data.get("taker_fill_count") or
+                         original.get("count", 0))
+        if filled_qty <= 0:
+            continue
+
+        # Build opposing sell order: same side, opposite action
+        unwind = {
+            "ticker": original["ticker"],
+            "side": original["side"],
+            "action": "sell",  # close the long position
+            "count": filled_qty,
+            "time_in_force": TIF_IOC,
+            "client_order_id": f"unwind-{uuid.uuid4()}",
+        }
+        # Sell at market by not specifying a price, OR at a price
+        # that's guaranteed to cross the book (1 cent for aggressive sell)
+        if "yes_price_dollars" in original:
+            unwind["yes_price_dollars"] = "0.0100"  # aggressive sell
+        else:
+            unwind["no_price_dollars"] = "0.0100"
+
+        try:
+            print(f"    [UNWIND] Selling {filled_qty} {original['side']} "
+                  f"on {original['ticker']}", flush=True)
+            trader._request("POST", f"{trader.base_url}/portfolio/orders",
+                            json=unwind)
+            unwound += 1
+            if risk_mgr:
+                risk_mgr._log_risk_event(
+                    "partial_fill_unwind",
+                    f"Unwound {filled_qty} {original['side']} on {original['ticker']}"
+                )
+        except Exception as e:
+            err = f"Failed to unwind {original['ticker']}: {e}"
+            print(f"    [UNWIND] ERROR: {err}", flush=True)
+            errors.append(err)
+
+    return unwound, errors
+
+
+def _get_real_exposure_cents(trader):
+    """
+    Reconcile exposure from Kalshi's actual portfolio positions.
+
+    Returns the sum of cost basis for all open positions in cents,
+    or None if the call fails.
+    """
+    try:
+        resp = trader.get_positions()
+        positions = resp.get("market_positions") or resp.get("positions") or []
+        total = 0
+        for p in positions:
+            # Try several possible cost-basis fields
+            for field in ("total_traded", "cost_basis_cents", "position",
+                          "realized_pnl_cents"):
+                val = p.get(field)
+                if isinstance(val, (int, float)) and val > 0:
+                    total += abs(int(val))
+                    break
+        return total
+    except Exception as e:
+        print(f"    [exposure sync] failed: {e}", flush=True)
+        return None
+
+
+def execute_opportunity(trader, risk_mgr, opp, contracts=1, dry_run=False,
+                        allow_multi_leg=False):
+    """
+    Full execution pipeline for one opportunity, with safety rails:
+
+    1. Safety filter: reject multi-leg arbs unless explicitly allowed
+    2. Real exposure sync from Kalshi (source of truth)
+    3. Risk check (limits, kill switch, drawdown)
+    4. Build orders (correct fixed-point format)
+    5. Submit via batch API (or dry-run log)
+    6. Verify fills; unwind any partial fills immediately
+    7. Only record exposure for legs that actually filled
 
     Returns (success: bool, detail: str)
     """
-    # 1. Risk check
+    # 1. Multi-leg arbs are opt-in — more legs = more partial fill risk
+    is_multi_leg = opp.type != "binary"
+    if is_multi_leg and not allow_multi_leg:
+        return False, "multi-leg arbs disabled (set CADENCE_ALLOW_MULTI_LEG=true to enable)"
+
+    # 2. Reconcile real exposure from Kalshi before any risk checks.
+    # This catches cases where our internal tracking drifted from the
+    # real account state (e.g. unwound positions, manual trades).
+    if not dry_run:
+        real_exposure = _get_real_exposure_cents(trader)
+        if real_exposure is not None:
+            risk_mgr.state.total_exposure_cents = real_exposure
+
+    # 3. Risk check
     decision = risk_mgr.check_trade(opp, contracts)
     if not decision.allowed:
         return False, f"RISK BLOCKED: {decision}"
 
-    # 2. Build orders
+    # 4. Build orders
     orders = build_orders_for_opportunity(opp, contracts)
     if not orders:
         return False, "No orders generated"
 
-    # 3. Execute
+    # 5. Dry run path
     if dry_run:
         print(f"    [DRY RUN] Would place {len(orders)} orders:")
         for o in orders:
@@ -244,36 +367,55 @@ def execute_opportunity(trader, risk_mgr, opp, contracts=1, dry_run=False):
         risk_mgr.record_trade_opened(opp, contracts)
         return True, f"DRY RUN: {len(orders)} orders logged"
 
+    # 6. Live execution
     try:
         if len(orders) <= 20:
             result = trader.batch_create_orders(orders)
         else:
-            # Shouldn't happen for arb trades, but handle gracefully
             result = {"orders": []}
             for order in orders:
-                r = trader.create_order(**{k: v for k, v in order.items()
-                                           if k != "type"})
+                r = trader.create_order(
+                    **{k: v for k, v in order.items()
+                       if k not in ("type",)}
+                )
                 result["orders"].append(r)
-
-        # Check for partial fills — critical for arb safety
-        filled_count = 0
-        total_count = len(orders)
-        for order_result in result.get("orders", []):
-            order_data = order_result.get("order", order_result)
-            status = order_data.get("status", "unknown")
-            if status in ("resting", "executed"):
-                filled_count += 1
-
-        if filled_count < total_count:
-            # PARTIAL FILL WARNING: Arb is only risk-free if ALL legs fill
-            print(f"    WARNING: Only {filled_count}/{total_count} legs filled!")
-            print(f"    This arb may not be fully hedged.")
-
-        risk_mgr.record_trade_opened(opp, contracts)
-        return True, f"Placed {filled_count}/{total_count} orders"
-
     except HTTPError as e:
         return False, f"ORDER ERROR: {e}"
+
+    # 7. Verify fills — only 'executed' status counts as filled
+    filled_count = 0
+    total_count = len(orders)
+    for order_result in result.get("orders", []):
+        status, _ = _parse_order_status(order_result)
+        if status in FILLED_STATUSES:
+            filled_count += 1
+
+    # 8. Partial fill: immediately unwind any filled legs
+    if filled_count > 0 and filled_count < total_count:
+        print(f"    ⚠ PARTIAL FILL: {filled_count}/{total_count} legs "
+              f"filled, unwinding to avoid naked exposure", flush=True)
+        unwound, errs = _unwind_filled_legs(trader, orders, result, risk_mgr)
+        if errs:
+            # Unwind failed — trip kill switch, this is a dangerous state
+            risk_mgr.activate_kill_switch(
+                f"Failed to unwind partial fill on {opp.event_ticker}: {errs}"
+            )
+            return False, (
+                f"PARTIAL FILL + UNWIND FAILED: {filled_count}/{total_count} "
+                f"filled, {unwound} unwound, {len(errs)} errors. "
+                f"KILL SWITCH ACTIVATED."
+            )
+        return False, (
+            f"partial fill ({filled_count}/{total_count}), unwound {unwound} legs"
+        )
+
+    # 9. Zero fills — nothing to track, nothing to unwind
+    if filled_count == 0:
+        return False, f"no legs filled (all orders rejected or cancelled)"
+
+    # 10. All legs filled — track exposure and return success
+    risk_mgr.record_trade_opened(opp, contracts)
+    return True, f"Placed {filled_count}/{total_count} orders"
 
 
 def run_executor(trader, risk_mgr, min_profit=1, contracts=1,

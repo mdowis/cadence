@@ -185,7 +185,11 @@ def scan_callback(markets):
 
 def execute_callback(opp, contracts, dry_run):
     """Called by the executor thread for each opportunity."""
-    return execute_opportunity(_trader, _risk_mgr, opp, contracts, dry_run)
+    allow_multi = env_bool("CADENCE_ALLOW_MULTI_LEG", False)
+    return execute_opportunity(
+        _trader, _risk_mgr, opp, contracts, dry_run,
+        allow_multi_leg=allow_multi,
+    )
 
 
 # ---------------------------------------------------------------------------

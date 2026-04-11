@@ -1,14 +1,19 @@
-"""Tests for Kalshi order body construction (executor.py)."""
+"""Tests for Kalshi order construction and execution safety (executor.py)."""
 
 from executor import (
     _cents_to_dollars_str,
     _yes_order,
     _no_order,
     build_orders_for_opportunity,
+    execute_opportunity,
+    _parse_order_status,
+    _unwind_filled_legs,
+    FILLED_STATUSES,
     TIF_IOC,
     TIF_GTC,
 )
 from kalshi_arbitrage import ArbitrageOpportunity
+from risk_manager import RiskManager, RiskConfig
 
 
 def test_cents_to_dollars_basic():
@@ -135,6 +140,249 @@ def test_unique_client_order_ids():
     assert len(set(ids)) == len(ids)
 
 
+# ---------------------------------------------------------------------------
+# Fake Kalshi trader for execution safety tests
+# ---------------------------------------------------------------------------
+
+class FakeTrader:
+    """
+    Minimal in-memory trader that records orders and returns scriptable
+    batch responses. Used to test execute_opportunity paths without
+    hitting the real Kalshi API.
+    """
+    def __init__(self, batch_response=None, positions_response=None,
+                 raise_on_batch=False):
+        self.authenticated = True
+        self.base_url = "https://fake"
+        self.calls = []
+        self.unwind_calls = []
+        self.batch_response = batch_response or {"orders": []}
+        self.positions_response = positions_response or {"positions": []}
+        self.raise_on_batch = raise_on_batch
+
+    def batch_create_orders(self, orders):
+        self.calls.append(("batch", list(orders)))
+        if self.raise_on_batch:
+            from kalshi_arbitrage import HTTPError
+            raise HTTPError("fake 400")
+        return self.batch_response
+
+    def create_order(self, **kwargs):
+        self.calls.append(("single", kwargs))
+        return {"status": "executed"}
+
+    def get_positions(self):
+        return self.positions_response
+
+    def get_balance(self):
+        return {"balance": 10000}
+
+    def _request(self, method, url, json=None):
+        self.unwind_calls.append(json)
+        return {"order": {"status": "executed"}}
+
+
+def _make_binary_opp(yes_ask=47, no_ask=48, event="EVT", ticker="T1"):
+    return ArbitrageOpportunity(
+        type="binary",
+        event_title="Test",
+        event_ticker=event,
+        markets=[{"ticker": ticker, "title": "Test",
+                  "yes_ask": yes_ask, "no_ask": no_ask}],
+        total_cost=yes_ask + no_ask,
+        guaranteed_payout=100,
+        profit_cents=100 - yes_ask - no_ask,
+        roi_percent=5,
+        fee_cents=2,
+        net_profit_cents=100 - yes_ask - no_ask - 2,
+    )
+
+
+def _make_multi_opp():
+    return ArbitrageOpportunity(
+        type="multi_outcome_under (buy all YES)",
+        event_title="Test",
+        event_ticker="MULTI",
+        markets=[
+            {"ticker": "A", "title": "a", "yes_ask": 30},
+            {"ticker": "B", "title": "b", "yes_ask": 25},
+            {"ticker": "C", "title": "c", "yes_ask": 20},
+        ],
+        total_cost=75,
+        guaranteed_payout=100,
+        profit_cents=25,
+        roi_percent=33,
+        fee_cents=2,
+        net_profit_cents=23,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Safety: fill status parsing
+# ---------------------------------------------------------------------------
+
+def test_only_executed_counts_as_filled():
+    """'resting' is NOT filled; only 'executed' counts."""
+    assert "executed" in FILLED_STATUSES
+    assert "resting" not in FILLED_STATUSES
+    assert "cancelled" not in FILLED_STATUSES
+    assert "rejected" not in FILLED_STATUSES
+
+
+def test_parse_order_status_flat():
+    status, order = _parse_order_status({"status": "executed", "ticker": "X"})
+    assert status == "executed"
+    assert order["ticker"] == "X"
+
+
+def test_parse_order_status_wrapped():
+    status, order = _parse_order_status(
+        {"order": {"status": "cancelled", "ticker": "Y"}}
+    )
+    assert status == "cancelled"
+    assert order["ticker"] == "Y"
+
+
+# ---------------------------------------------------------------------------
+# Safety: multi-leg arbs are opt-in
+# ---------------------------------------------------------------------------
+
+def test_multi_leg_blocked_by_default():
+    rm = RiskManager(starting_equity_cents=100000)
+    trader = FakeTrader()
+    opp = _make_multi_opp()
+    success, detail = execute_opportunity(
+        trader, rm, opp, contracts=1, dry_run=True,
+        allow_multi_leg=False,
+    )
+    assert not success
+    assert "multi-leg" in detail.lower()
+    # No orders should have been placed
+    assert len(trader.calls) == 0
+
+
+def test_multi_leg_allowed_when_opted_in():
+    rm = RiskManager(starting_equity_cents=100000)
+    trader = FakeTrader()
+    opp = _make_multi_opp()
+    success, detail = execute_opportunity(
+        trader, rm, opp, contracts=1, dry_run=True,
+        allow_multi_leg=True,
+    )
+    assert success  # dry-run path, should succeed
+
+
+# ---------------------------------------------------------------------------
+# Safety: partial fills are unwound
+# ---------------------------------------------------------------------------
+
+def test_zero_fills_returns_failure():
+    """If no legs fill, don't track exposure, don't say success."""
+    rm = RiskManager(starting_equity_cents=100000)
+    trader = FakeTrader(batch_response={
+        "orders": [
+            {"order": {"status": "cancelled"}},
+            {"order": {"status": "cancelled"}},
+        ]
+    })
+    opp = _make_binary_opp()
+    success, detail = execute_opportunity(
+        trader, rm, opp, contracts=1, dry_run=False,
+    )
+    assert not success
+    assert "no legs filled" in detail.lower() or "0" in detail
+    # Exposure must not have been tracked
+    assert rm.state.total_exposure_cents == 0
+
+
+def test_partial_fill_triggers_unwind():
+    """One leg filled, other cancelled → unwind the filled leg."""
+    rm = RiskManager(starting_equity_cents=100000)
+    trader = FakeTrader(batch_response={
+        "orders": [
+            {"order": {"status": "executed", "filled_quantity": 1}},
+            {"order": {"status": "cancelled"}},
+        ]
+    })
+    opp = _make_binary_opp()
+    success, detail = execute_opportunity(
+        trader, rm, opp, contracts=1, dry_run=False,
+    )
+    assert not success  # partial fill is never success
+    assert "partial" in detail.lower()
+    # Unwind should have been attempted
+    assert len(trader.unwind_calls) == 1
+    unwind = trader.unwind_calls[0]
+    assert unwind["action"] == "sell"
+    # Exposure should NOT be recorded for partial fills
+    assert rm.state.total_exposure_cents == 0
+
+
+def test_full_fill_records_exposure():
+    """All legs filled → record exposure, report success."""
+    rm = RiskManager(starting_equity_cents=100000)
+    trader = FakeTrader(batch_response={
+        "orders": [
+            {"order": {"status": "executed", "filled_quantity": 1}},
+            {"order": {"status": "executed", "filled_quantity": 1}},
+        ]
+    })
+    opp = _make_binary_opp(yes_ask=47, no_ask=48)
+    success, detail = execute_opportunity(
+        trader, rm, opp, contracts=1, dry_run=False,
+    )
+    assert success
+    # Exposure tracked = full cost of the arb
+    assert rm.state.total_exposure_cents == 95
+    # No unwind calls
+    assert len(trader.unwind_calls) == 0
+
+
+def test_http_error_does_not_track_exposure():
+    """If the batch call raises, nothing was placed, track nothing."""
+    rm = RiskManager(starting_equity_cents=100000)
+    trader = FakeTrader(raise_on_batch=True)
+    opp = _make_binary_opp()
+    success, detail = execute_opportunity(
+        trader, rm, opp, contracts=1, dry_run=False,
+    )
+    assert not success
+    assert "ORDER ERROR" in detail
+    assert rm.state.total_exposure_cents == 0
+
+
+# ---------------------------------------------------------------------------
+# Safety: risk check blocks still work
+# ---------------------------------------------------------------------------
+
+def test_risk_block_prevents_order():
+    rm = RiskManager(
+        config=RiskConfig(max_per_trade_cents=10),  # $0.10 cap
+        starting_equity_cents=100000,
+    )
+    trader = FakeTrader()
+    opp = _make_binary_opp(yes_ask=47, no_ask=48)  # cost = 95c, over limit
+    success, detail = execute_opportunity(
+        trader, rm, opp, contracts=1, dry_run=False,
+    )
+    assert not success
+    assert "RISK BLOCKED" in detail
+    # No orders submitted
+    assert len(trader.calls) == 0
+
+
+def test_kill_switch_blocks_even_in_dry_run():
+    rm = RiskManager(starting_equity_cents=100000)
+    rm.activate_kill_switch("test")
+    trader = FakeTrader()
+    opp = _make_binary_opp()
+    success, detail = execute_opportunity(
+        trader, rm, opp, contracts=1, dry_run=True,
+    )
+    assert not success
+    assert "BLOCKED" in detail
+
+
 if __name__ == "__main__":
     test_cents_to_dollars_basic()
     test_yes_order_body()
@@ -144,4 +392,15 @@ if __name__ == "__main__":
     test_multi_yes_builds_all_yes_legs()
     test_multi_no_builds_all_no_legs()
     test_unique_client_order_ids()
-    print("All 8 executor tests passed!")
+    test_only_executed_counts_as_filled()
+    test_parse_order_status_flat()
+    test_parse_order_status_wrapped()
+    test_multi_leg_blocked_by_default()
+    test_multi_leg_allowed_when_opted_in()
+    test_zero_fills_returns_failure()
+    test_partial_fill_triggers_unwind()
+    test_full_fill_records_exposure()
+    test_http_error_does_not_track_exposure()
+    test_risk_block_prevents_order()
+    test_kill_switch_blocks_even_in_dry_run()
+    print("All 19 executor tests passed!")

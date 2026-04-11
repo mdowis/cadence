@@ -236,10 +236,22 @@ class ProcessController:
             self._executor_stop.set()
             return True, "Executor stopping..."
 
+    # Safety config
+    MAX_TRADES_PER_CYCLE = 1      # Hard cap: execute at most 1 opp per cycle
+    ATTEMPT_TTL_SECONDS = 300     # Don't retry same arb for 5 minutes
+
+    def _opp_fingerprint(self, opp):
+        """Unique key for dedup: event + sorted tuple of leg tickers."""
+        tickers = tuple(sorted(m.get("ticker", "") for m in opp.markets))
+        return (opp.event_ticker, tickers)
+
     def _executor_loop(self):
         self.executor_status.status = "running"
         self.executor_status.last_detail = \
             f"Started ({'DRY RUN' if self.dry_run else 'LIVE'})"
+
+        # Dedup state: fingerprint -> timestamp of last attempt
+        recent_attempts = {}
 
         while not self._executor_stop.is_set():
             try:
@@ -251,6 +263,13 @@ class ProcessController:
                         break
                     continue
 
+                # Garbage-collect expired dedup entries
+                now = time.time()
+                recent_attempts = {
+                    k: v for k, v in recent_attempts.items()
+                    if now - v < self.ATTEMPT_TTL_SECONDS
+                }
+
                 # Get latest opportunities from scanner
                 with self._opportunities_lock:
                     opps = list(self._latest_opportunities)
@@ -258,23 +277,49 @@ class ProcessController:
                 if not opps:
                     self.executor_status.last_detail = "No opportunities"
                 else:
-                    # Try to execute each (best first, scanner already sorted)
+                    # Filter out recently-attempted arbs to prevent same-opp
+                    # spam (scanner finds the same arb every cycle until
+                    # someone else closes the gap).
+                    fresh_opps = []
                     for opp in opps:
-                        if self._executor_stop.is_set():
-                            break
+                        fp = self._opp_fingerprint(opp)
+                        if fp not in recent_attempts:
+                            fresh_opps.append(opp)
 
-                        success, detail = self.execute_callback(
-                            opp, self.contracts_per_leg, self.dry_run
+                    if not fresh_opps:
+                        self.executor_status.last_detail = (
+                            f"All {len(opps)} opps in cooldown "
+                            f"(waiting {self.ATTEMPT_TTL_SECONDS}s)"
                         )
+                    else:
+                        # Execute at most MAX_TRADES_PER_CYCLE per iteration.
+                        # Scanner has already sorted by net profit descending.
+                        attempted_this_cycle = 0
+                        for opp in fresh_opps:
+                            if self._executor_stop.is_set():
+                                break
+                            if attempted_this_cycle >= self.MAX_TRADES_PER_CYCLE:
+                                break
 
-                        if success:
-                            self.executor_status.trades_placed += 1
-                            self.executor_status.last_detail = \
-                                f"Executed {opp.event_ticker}: {detail}"
-                        else:
-                            # Most blocks are risk-check rejections; log but continue
-                            self.executor_status.last_detail = \
-                                f"Skipped {opp.event_ticker}: {detail}"
+                            fp = self._opp_fingerprint(opp)
+                            recent_attempts[fp] = now
+                            attempted_this_cycle += 1
+
+                            success, detail = self.execute_callback(
+                                opp, self.contracts_per_leg, self.dry_run
+                            )
+
+                            if success:
+                                self.executor_status.trades_placed += 1
+                                self.executor_status.last_detail = \
+                                    f"Executed {opp.event_ticker}: {detail}"
+                                print(f"  [executor] + {opp.event_ticker}: {detail}",
+                                      flush=True)
+                            else:
+                                self.executor_status.last_detail = \
+                                    f"Skipped {opp.event_ticker}: {detail}"
+                                print(f"  [executor] - {opp.event_ticker}: {detail}",
+                                      flush=True)
 
                 self.executor_status.run_count += 1
                 self.executor_status.last_run_at = time.time()
