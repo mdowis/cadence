@@ -24,6 +24,7 @@ class ProcessStatus:
     run_count: int = 0
     trades_placed: int = 0           # executor only
     last_detail: str = ""
+    recent_decisions: list = field(default_factory=list)  # executor only
 
     def to_dict(self):
         return {
@@ -34,6 +35,7 @@ class ProcessStatus:
             "run_count": self.run_count,
             "trades_placed": self.trades_placed,
             "last_detail": self.last_detail,
+            "recent_decisions": list(self.recent_decisions),
             "uptime_seconds": (time.time() - self.started_at) if self.started_at else 0,
         }
 
@@ -256,6 +258,26 @@ class ProcessController:
         tickers = tuple(sorted(m.get("ticker", "") for m in opp.markets))
         return (opp.event_ticker, tickers)
 
+    MAX_RECENT_DECISIONS = 50
+
+    def _record_decision(self, opp, success, detail, attempted=True):
+        """Log an executor decision to the ring buffer for dashboard display."""
+        entry = {
+            "time": time.time(),
+            "time_str": time.strftime("%H:%M:%S"),
+            "event_ticker": opp.event_ticker,
+            "event_title": getattr(opp, "event_title", ""),
+            "type": opp.type,
+            "net_profit_cents": getattr(opp, "net_profit_cents", 0),
+            "roi_percent": getattr(opp, "roi_percent", 0),
+            "attempted": attempted,
+            "success": success,
+            "detail": detail,
+        }
+        buf = self.executor_status.recent_decisions
+        buf.insert(0, entry)
+        del buf[self.MAX_RECENT_DECISIONS:]
+
     def _executor_loop(self):
         self.executor_status.status = "running"
         self.executor_status.last_detail = \
@@ -302,6 +324,13 @@ class ProcessController:
                             f"All {len(opps)} opps in cooldown "
                             f"(waiting {self.ATTEMPT_TTL_SECONDS}s)"
                         )
+                        # Record the top opp as being in cooldown so the
+                        # dashboard shows WHY nothing is happening
+                        if opps:
+                            self._record_decision(
+                                opps[0], False, "in cooldown",
+                                attempted=False,
+                            )
                     else:
                         # Execute at most MAX_TRADES_PER_CYCLE per iteration.
                         # Scanner has already sorted by net profit descending.
@@ -319,7 +348,10 @@ class ProcessController:
                             success, detail = self.execute_callback(
                                 opp, self.contracts_per_leg, self.dry_run
                             )
-
+                            self._record_decision(
+                                opp, success, detail,
+                                attempted=True,
+                            )
                             if success:
                                 self.executor_status.trades_placed += 1
                                 self.executor_status.last_detail = \

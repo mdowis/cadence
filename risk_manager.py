@@ -65,11 +65,12 @@ class RiskConfig:
     # IMPORTANT: min profit should exceed the expected partial-fill unwind
     # cost. If one leg fills and the other doesn't, we sell the filled
     # leg at the bid, paying the bid-ask spread (~2c per leg) plus taker
-    # fees on both the buy and the sell (~2c each). That's ~6c per
-    # contract in worst-case unwind cost for a binary arb. A 1c "arb"
-    # would actually lose money after any partial fill.
-    min_net_profit_cents: float = 5.0       # Don't trade arbs below this net profit
-    min_roi_pct: float = 1.0                # Don't trade arbs below this ROI%
+    # fees on both the buy and the sell (~2c each). That's ~6c worst-case
+    # per contract for a binary arb. 3c is a middle ground: high enough
+    # that trades have a shot at being profitable, low enough that real
+    # arb opportunities aren't all filtered out.
+    min_net_profit_cents: float = 3.0       # Don't trade arbs below this net profit
+    min_roi_pct: float = 0.5                # Don't trade arbs below this ROI%
 
     def to_dict(self):
         return {k: v for k, v in self.__dict__.items()}

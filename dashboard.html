@@ -551,6 +551,64 @@
   }
   .risk-btn.reset:hover { background: var(--blue); color: #fff; }
 
+  /* ---- Decisions Log ---- */
+  .decisions-log {
+    margin-top: 0.4rem;
+    max-height: 180px;
+    overflow-y: auto;
+    font-family: monospace;
+    font-size: 0.65rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.4rem 0.5rem;
+  }
+  .decision-row {
+    padding: 0.25rem 0;
+    border-bottom: 1px dashed rgba(30,45,74,0.4);
+    display: flex;
+    gap: 0.4rem;
+    align-items: baseline;
+    white-space: nowrap;
+  }
+  .decision-row:last-child { border-bottom: none; }
+  .decision-time { color: var(--text-dim); font-size: 0.55rem; width: 50px; flex-shrink: 0; }
+  .decision-mark {
+    width: 14px;
+    text-align: center;
+    font-weight: 900;
+    flex-shrink: 0;
+  }
+  .decision-mark.ok { color: var(--green); }
+  .decision-mark.skip { color: var(--yellow); }
+  .decision-mark.block { color: var(--red); }
+  .decision-ticker {
+    color: var(--cyan);
+    width: 90px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex-shrink: 0;
+  }
+  .decision-profit {
+    color: var(--text-dim);
+    width: 42px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+  .decision-detail {
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    min-width: 0;
+  }
+  .decisions-empty {
+    color: var(--text-dim);
+    text-align: center;
+    padding: 0.5rem 0;
+    font-style: italic;
+  }
+
   .risk-events {
     max-height: 120px;
     overflow-y: auto;
@@ -777,6 +835,13 @@
         <div id="liveModeWarning" class="live-mode-warning" style="display:none">
           LIVE MODE: Real money trades will be placed. Monitor actively.
         </div>
+
+        <!-- Executor Decision Log -->
+        <div style="font-size:0.6rem; color:var(--text-dim); margin-top:0.75rem; text-transform:uppercase; letter-spacing:0.5px">
+          Recent Executor Decisions
+          <span style="float:right;font-size:0.55rem;text-transform:none">(why trades skipped)</span>
+        </div>
+        <div id="decisionsLog" class="decisions-log"></div>
       </div>
     </div>
 
@@ -1650,6 +1715,32 @@ function renderProcesses() {
   document.getElementById('dryRunToggle').checked = p.config.dry_run;
   document.getElementById('dryRunLabel').textContent = p.config.dry_run ? 'DRY RUN' : 'LIVE';
   document.getElementById('liveModeWarning').style.display = p.config.dry_run ? 'none' : 'block';
+
+  // Decisions log
+  renderDecisions(e.recent_decisions || []);
+}
+
+function renderDecisions(decisions) {
+  const container = document.getElementById('decisionsLog');
+  if (!decisions || decisions.length === 0) {
+    container.innerHTML = '<div class="decisions-empty">No executor decisions yet</div>';
+    return;
+  }
+
+  container.innerHTML = decisions.map(d => {
+    const mark = d.success ? '+' : (d.attempted ? 'x' : '-');
+    const cls = d.success ? 'ok' : (d.attempted ? 'block' : 'skip');
+    const profit = d.net_profit_cents ? d.net_profit_cents.toFixed(0) + 'c' : '—';
+    return `
+      <div class="decision-row">
+        <span class="decision-time">${esc(d.time_str || '')}</span>
+        <span class="decision-mark ${cls}">${mark}</span>
+        <span class="decision-ticker" title="${esc(d.event_title || '')}">${esc(d.event_ticker || '?')}</span>
+        <span class="decision-profit">${profit}</span>
+        <span class="decision-detail">${esc(d.detail || '')}</span>
+      </div>
+    `;
+  }).join('');
 }
 
 function formatUptime(seconds) {
