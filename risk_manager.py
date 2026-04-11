@@ -144,7 +144,7 @@ class RiskManager:
     """
 
     def __init__(self, config: RiskConfig = None, starting_equity_cents: int = 0,
-                 state_file: str = None):
+                 state_file: str = None, notifier=None):
         self.config = config or RiskConfig()
         self.state = RiskState(
             starting_equity_cents=starting_equity_cents,
@@ -154,6 +154,7 @@ class RiskManager:
             daily_date=time.strftime("%Y-%m-%d"),
         )
         self.state_file = state_file
+        self.notifier = notifier  # optional TelegramNotifier
         self._lock = Lock()
 
         # Restore state if file exists
@@ -431,12 +432,18 @@ class RiskManager:
 
     def activate_kill_switch(self, reason="Manual activation"):
         """Immediately halt all trading."""
+        was_active = self.state.kill_switch_active
+        equity = 0
         with self._lock:
             self.state.kill_switch_active = True
             self.state.kill_switch_reason = reason
             self.state.kill_switch_time = time.time()
             self._log_risk_event("kill_switch_activated", reason)
+            equity = self.state.current_equity_cents
             self._persist()
+        # Notify outside the lock so Telegram calls don't block other threads
+        if self.notifier and not was_active:
+            self.notifier.notify_kill_switch(reason, equity_cents=equity)
 
     def deactivate_kill_switch(self):
         """Resume trading (requires explicit action)."""
@@ -624,22 +631,28 @@ class RiskManager:
             reason = (f"Drawdown {drawdown_pct:.1f}% hit limit "
                       f"{self.config.max_drawdown_pct}% "
                       f"(peak: {peak}¢, current: {equity}¢)")
+            was_active = self.state.kill_switch_active
             self.state.kill_switch_active = True
             self.state.kill_switch_reason = reason
             self.state.kill_switch_time = time.time()
             self._log_risk_event("kill_switch_drawdown_pct", reason)
             self._persist()
+            if self.notifier and not was_active:
+                self.notifier.notify_kill_switch(reason, equity_cents=equity)
             return RiskDecision(RiskAction.BLOCK_DRAWDOWN, reason)
 
         # Absolute drawdown
         if self.config.max_drawdown_cents and drawdown_cents >= self.config.max_drawdown_cents:
             reason = (f"Drawdown {drawdown_cents}¢ hit limit "
                       f"{self.config.max_drawdown_cents}¢")
+            was_active = self.state.kill_switch_active
             self.state.kill_switch_active = True
             self.state.kill_switch_reason = reason
             self.state.kill_switch_time = time.time()
             self._log_risk_event("kill_switch_drawdown_abs", reason)
             self._persist()
+            if self.notifier and not was_active:
+                self.notifier.notify_kill_switch(reason, equity_cents=equity)
             return RiskDecision(RiskAction.BLOCK_DRAWDOWN, reason)
 
         return None

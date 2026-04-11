@@ -55,6 +55,7 @@ process_controller.py  Manages scanner and executor background threads
 kalshi_arbitrage.py    Scanner: finds opportunities, computes fees
 risk_manager.py        Risk engine: gates every trade through limits
 executor.py            Order placement via Kalshi trading API
+notifier.py            Telegram notifier (optional, background thread)
 .env.example           Configuration template (copy to .env)
 ```
 
@@ -281,13 +282,46 @@ When running `dashboard.py`, these JSON endpoints are available:
 | POST | `/api/config` | Update runtime config (interval, min_profit, etc.) |
 | POST | `/api/risk/kill-switch/activate` | Halt all trading |
 | POST | `/api/risk/kill-switch/deactivate` | Resume trading |
-| POST | `/api/risk/reset-daily` | Reset daily P&L and trade counters |
+| POST | `/api/risk/reset-daily` | Reset daily P&L, baseline, peak to current equity |
+| GET | `/api/diagnostics` | Full diagnostic dump (auth, trader, processes, telegram) |
+| POST | `/api/test-fetch` | Synchronous Kalshi market fetch for debugging |
+| POST | `/api/telegram/test` | Send a test Telegram message |
+
+## Telegram Notifications (optional)
+
+Cadence can push updates to a Telegram bot so you don't have to babysit the dashboard. Setup:
+
+1. Message [@BotFather](https://t.me/botfather) on Telegram → `/newbot` → follow prompts → copy the bot token
+2. Send `/start` to your new bot
+3. Visit `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser and find the `chat.id` in the JSON
+4. Add to `.env`:
+   ```bash
+   CADENCE_TELEGRAM_BOT_TOKEN=123456:ABC-your-token
+   CADENCE_TELEGRAM_CHAT_ID=987654321
+   ```
+5. Restart the dashboard and visit `POST http://localhost:8050/api/telegram/test` to verify
+
+You'll receive notifications for:
+- **Startup/shutdown** — brief message on boot and stop
+- **Every successful trade** — event, type, contracts, profit, detail
+- **Partial fills and unwinds** — critical for monitoring the unwind path
+- **Kill switch activations** — always, never deduped
+- **Scanner errors** — deduped within a 60s window so repeated errors don't spam
+- **Hourly status** — equity, daily P&L, drawdown, exposure, open positions, trades today
+
+Optional: `CADENCE_TELEGRAM_STATUS_INTERVAL=3600` controls the periodic status interval (default 1 hour).
+
+All Telegram calls run in a background thread so slow network to Telegram never blocks the scanner or executor. Failed sends are logged and retried with exponential backoff on 5xx; 4xx failures (bad token, bad chat id) fail fast.
 
 ## Testing
 
 ```bash
-python test_arbitrage.py       # 14 tests: fee model, detection, edge cases
-python test_risk_manager.py    # 23 tests: kill switch, drawdown, balance sync, limits, lifecycle
+python test_arbitrage.py       # 22 tests: fee model, detection, migration normalization
+python test_risk_manager.py    # 36 tests: kill switch, drawdown, balance sync, dynamic limits
+python test_signer.py          #  6 tests: RSA-PSS signature round trip
+python test_dashboard.py       #  1 test:  JS syntax check
+python test_executor.py        # 21 tests: order body, fill parsing, unwind, safety
+python test_notifier.py        # 11 tests: Telegram queue, dedup, retries, format
 ```
 
 ## Project Structure
@@ -300,8 +334,13 @@ cadence/
   kalshi_arbitrage.py     Scanner + Kalshi API client + fee model
   risk_manager.py         Risk config, balance sync, trade gating
   executor.py             Order placement via Kalshi trading API
+  notifier.py             Telegram notifier (optional, background thread)
   test_arbitrage.py       Scanner and fee model tests
   test_risk_manager.py    Risk management and balance sync tests
+  test_signer.py          Kalshi RSA signing tests
+  test_executor.py        Order construction and execution safety tests
+  test_notifier.py        Telegram notifier tests (no real network calls)
+  test_dashboard.py       Dashboard JS syntax check
   .env.example            Configuration template
   .gitignore              Excludes .env, __pycache__, venvs, state files
   requirements.txt        (empty - no external dependencies, stdlib only)

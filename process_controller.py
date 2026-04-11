@@ -49,7 +49,8 @@ class ProcessController:
     """
 
     def __init__(self, trader, risk_mgr, scan_callback, execute_callback,
-                 min_profit=1, interval=15, dry_run=True, max_markets=None):
+                 min_profit=1, interval=15, dry_run=True, max_markets=None,
+                 notifier=None, status_interval_secs=3600):
         self.max_markets = max_markets
         self.trader = trader
         self.risk_mgr = risk_mgr
@@ -59,6 +60,9 @@ class ProcessController:
         self.interval = interval
         self.dry_run = dry_run
         self.contracts_per_leg = 1
+        self.notifier = notifier                 # optional TelegramNotifier
+        self.status_interval_secs = status_interval_secs
+        self._last_status_notify = 0.0
 
         self._lock = threading.Lock()
 
@@ -187,11 +191,18 @@ class ProcessController:
                     # Balance sync is non-fatal — don't kill the scanner
                     print(f"  [scanner] Balance sync failed: {e}", flush=True)
 
+                # Periodic Telegram status update
+                self._maybe_notify_status()
+
             except Exception as e:
                 self.scanner_status.last_error = f"{type(e).__name__}: {e}"
                 self.scanner_status.last_detail = f"ERROR: {e}"
                 print(f"  [scanner] ERROR: {type(e).__name__}: {e}", flush=True)
                 traceback.print_exc()
+                if self.notifier:
+                    self.notifier.notify_scanner_error(
+                        f"{type(e).__name__}: {e}"
+                    )
 
             # Sleep, but wake up on stop signal
             if self._scanner_stop.wait(self.interval):
@@ -257,6 +268,27 @@ class ProcessController:
         """Unique key for dedup: event + sorted tuple of leg tickers."""
         tickers = tuple(sorted(m.get("ticker", "") for m in opp.markets))
         return (opp.event_ticker, tickers)
+
+    def _maybe_notify_status(self):
+        """Send a periodic status summary to Telegram, if configured."""
+        if not self.notifier:
+            return
+        now = time.time()
+        if now - self._last_status_notify < self.status_interval_secs:
+            return
+        self._last_status_notify = now
+        try:
+            s = self.risk_mgr.get_status()
+            self.notifier.notify_status(
+                equity_cents=s["equity_cents"],
+                daily_pnl_cents=s["daily_pnl_cents"],
+                drawdown_pct=s["drawdown_pct"],
+                exposure_cents=s["total_exposure_cents"],
+                trades_today=s["daily_trade_count"],
+                open_positions=s["open_position_count"],
+            )
+        except Exception as e:
+            print(f"  [notifier] status build failed: {e}", flush=True)
 
     MAX_RECENT_DECISIONS = 50
 
@@ -358,11 +390,27 @@ class ProcessController:
                                     f"Executed {opp.event_ticker}: {detail}"
                                 print(f"  [executor] + {opp.event_ticker}: {detail}",
                                       flush=True)
+                                # Notify Telegram on every successful trade
+                                if self.notifier:
+                                    self.notifier.notify_trade(
+                                        opp, True, detail, self.contracts_per_leg,
+                                    )
                             else:
                                 self.executor_status.last_detail = \
                                     f"Skipped {opp.event_ticker}: {detail}"
                                 print(f"  [executor] - {opp.event_ticker}: {detail}",
                                       flush=True)
+                                # Notify on interesting failures
+                                # (skip risk blocks — too noisy; notify on
+                                # partial fills and order errors only)
+                                if self.notifier and (
+                                    "partial" in detail.lower()
+                                    or "ORDER ERROR" in detail
+                                    or "KILL SWITCH" in detail
+                                ):
+                                    self.notifier.notify_trade(
+                                        opp, False, detail, self.contracts_per_leg,
+                                    )
 
                 self.executor_status.run_count += 1
                 self.executor_status.last_run_at = time.time()

@@ -75,6 +75,7 @@ from kalshi_arbitrage import (
 from risk_manager import RiskManager, RiskConfig
 from executor import KalshiTrader, execute_opportunity
 from process_controller import ProcessController
+from notifier import build_from_env as build_notifier
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +97,7 @@ _scan_lock = threading.Lock()
 _risk_mgr = None
 _trader = None
 _process_ctrl = None
+_notifier = None
 
 
 def run_scan(markets, min_profit=1, mode="demo"):
@@ -371,6 +373,27 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 })
             self._json(result)
 
+        elif self.path == "/api/telegram/test":
+            if not _notifier or not _notifier.enabled:
+                self._json({
+                    "success": False,
+                    "error": "Telegram not configured. Set "
+                             "CADENCE_TELEGRAM_BOT_TOKEN + CADENCE_TELEGRAM_CHAT_ID"
+                }, 400)
+                return
+            # Bypass dedup by adding a timestamp
+            test_msg = (
+                f"*Cadence test message*\n"
+                f"Sent: `{time.strftime('%Y-%m-%d %H:%M:%S')}`\n"
+                f"If you're reading this, your Telegram bot is wired up correctly."
+            )
+            queued = _notifier.send(test_msg)
+            self._json({
+                "success": queued,
+                "queued": queued,
+                "stats": _notifier.get_stats(),
+            })
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -467,6 +490,7 @@ def build_diagnostics():
         "latest_scan_mode": _latest_scan.get("mode"),
         "latest_scan_markets": len(_latest_scan.get("markets", [])),
         "latest_scan_timestamp": _latest_scan.get("timestamp"),
+        "telegram": _notifier.get_stats() if _notifier else {"enabled": False},
     }
     return diag
 
@@ -505,7 +529,7 @@ Then open http://localhost:8050
                         help="Dashboard port")
     args = parser.parse_args()
 
-    global _risk_mgr, _trader, _process_ctrl
+    global _risk_mgr, _trader, _process_ctrl, _notifier
 
     print("=" * 60)
     print("  CADENCE - Kalshi Arbitrage Dashboard")
@@ -526,11 +550,20 @@ Then open http://localhost:8050
     starting_equity = env_int("CADENCE_EQUITY", 5000)
     state_file = os.environ.get("CADENCE_STATE_FILE") or None
 
-    # 2. Initialize risk manager
+    # 1b. Initialize Telegram notifier (optional, reads env vars)
+    _notifier = build_notifier()
+    if _notifier.enabled:
+        print(f"  Telegram: enabled (chat_id={_notifier.chat_id[:4]}...)")
+    else:
+        print(f"  Telegram: disabled "
+              f"(set CADENCE_TELEGRAM_BOT_TOKEN + CADENCE_TELEGRAM_CHAT_ID to enable)")
+
+    # 2. Initialize risk manager (wire notifier for kill switch events)
     _risk_mgr = RiskManager(
         config=risk_config,
         starting_equity_cents=starting_equity,
         state_file=state_file,
+        notifier=_notifier,
     )
 
     # 3. Initialize Kalshi trader (authenticated if creds present)
@@ -585,15 +618,18 @@ Then open http://localhost:8050
     # 5. Initialize process controller
     max_markets = os.environ.get("CADENCE_MAX_MARKETS", "").strip()
     max_markets_int = int(max_markets) if max_markets.isdigit() else None
+    status_interval = env_int("CADENCE_TELEGRAM_STATUS_INTERVAL", 3600)
     _process_ctrl = ProcessController(
         trader=_trader,
         risk_mgr=_risk_mgr,
         scan_callback=scan_callback,
         execute_callback=execute_callback,
-        min_profit=env_float("CADENCE_MIN_PROFIT", 2),
+        min_profit=env_float("CADENCE_MIN_PROFIT", 3),
         interval=env_int("CADENCE_INTERVAL", 15),
         dry_run=True,  # default to dry run; user enables live via dashboard
         max_markets=max_markets_int,
+        notifier=_notifier,
+        status_interval_secs=status_interval,
     )
     _process_ctrl.contracts_per_leg = env_int("CADENCE_CONTRACTS", 1)
 
@@ -632,6 +668,13 @@ Then open http://localhost:8050
             print(f"  Scanner: auto-start failed - {msg}")
         print()
 
+    # Send startup Telegram notification
+    if _notifier and _notifier.enabled:
+        _notifier.notify_startup(
+            equity_cents=_risk_mgr.state.current_equity_cents,
+            authenticated=authenticated,
+        )
+
     # 9. Start web server
     server = HTTPServer(("0.0.0.0", args.port), DashboardHandler)
     try:
@@ -641,6 +684,9 @@ Then open http://localhost:8050
         if _process_ctrl:
             _process_ctrl.stop_scanner()
             _process_ctrl.stop_executor()
+        if _notifier and _notifier.enabled:
+            _notifier.notify_shutdown()
+            _notifier.stop()
         server.server_close()
 
 
