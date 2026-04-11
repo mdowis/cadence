@@ -544,6 +544,12 @@
     color: var(--green);
   }
   .risk-btn.resume:hover { background: var(--green); color: #000; }
+  .risk-btn.reset {
+    border-color: var(--blue);
+    background: rgba(59,130,246,0.1);
+    color: var(--blue);
+  }
+  .risk-btn.reset:hover { background: var(--blue); color: #fff; }
 
   .risk-events {
     max-height: 120px;
@@ -1547,14 +1553,23 @@ function renderRisk() {
 
   // Buttons
   const btnContainer = document.getElementById('riskButtons');
+  const resetBtn = `
+    <button class="risk-btn reset"
+            style="margin-top:0.4rem"
+            onclick="if(confirm('Reset daily P&amp;L, peak equity, and baseline to current equity?')) resetDaily()">
+      Reset Daily P&amp;L / Baseline
+    </button>
+  `;
   if (killActive) {
     btnContainer.innerHTML = `
       <button class="risk-btn resume" onclick="killSwitch(false)">Resume Trading</button>
       <div style="font-size:0.6rem;color:var(--text-dim);margin-top:0.3rem;text-align:center">${esc(r.kill_switch_reason)}</div>
+      ${resetBtn}
     `;
   } else {
     btnContainer.innerHTML = `
       <button class="risk-btn kill" onclick="if(confirm('Halt ALL trading immediately?')) killSwitch(true)">Emergency Kill Switch</button>
+      ${resetBtn}
     `;
   }
 
