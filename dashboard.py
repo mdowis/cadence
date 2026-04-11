@@ -438,15 +438,21 @@ def env_optional_float(key):
 
 def build_risk_config():
     """Build RiskConfig from environment variables with sane defaults."""
+    drawdown_ref = os.environ.get(
+        "CADENCE_DRAWDOWN_REFERENCE", "session_start"
+    ).strip().lower()
+    if drawdown_ref not in ("session_start", "peak"):
+        drawdown_ref = "session_start"
     return RiskConfig(
         max_drawdown_pct=env_float("CADENCE_MAX_DRAWDOWN_PCT", 10.0),
+        drawdown_reference=drawdown_ref,
         daily_loss_limit_cents=env_int("CADENCE_DAILY_LOSS_LIMIT", 2000),
         daily_loss_limit_pct=env_optional_float("CADENCE_DAILY_LOSS_LIMIT_PCT"),
         max_per_trade_cents=env_int("CADENCE_MAX_PER_TRADE", 500),
         max_per_trade_pct=env_optional_float("CADENCE_MAX_PER_TRADE_PCT"),
         max_total_exposure_cents=env_int("CADENCE_MAX_EXPOSURE", 10000),
         max_consecutive_losses=env_int("CADENCE_MAX_CONSECUTIVE_LOSSES", 5),
-        min_net_profit_cents=env_float("CADENCE_MIN_PROFIT", 2),
+        min_net_profit_cents=env_float("CADENCE_MIN_PROFIT", 3),
     )
 
 
@@ -837,7 +843,8 @@ Then open http://localhost:8050
     if authenticated:
         status = _risk_mgr.get_status()
         print(f"  Equity:         ${status['equity_cents']/100:.2f}")
-        print(f"  Max drawdown:   {risk_config.max_drawdown_pct}% from peak (trailing)")
+        print(f"  Max drawdown:   {risk_config.max_drawdown_pct}% "
+              f"(reference: {risk_config.drawdown_reference})")
         pt_limit = status.get("effective_per_trade_limit_cents")
         pt_basis = status.get("per_trade_limit_basis", "none")
         if pt_limit is not None:

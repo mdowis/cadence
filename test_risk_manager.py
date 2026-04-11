@@ -59,6 +59,52 @@ def test_drawdown_absolute_triggers_kill_switch():
     assert decision.action == RiskAction.BLOCK_DRAWDOWN
 
 
+def test_drawdown_default_is_session_start_not_peak():
+    """
+    REGRESSION: user reported kill switch triggering even without any
+    Cadence trades. Root cause was peak-based drawdown tripping from
+    portfolio fluctuations of existing positions. Default is now
+    session_start which resets daily and on manual reset.
+    """
+    config = RiskConfig(max_drawdown_pct=10.0)
+    rm = RiskManager(config=config, starting_equity_cents=0)
+    # First sync: user opens Cadence with $600 portfolio (existing positions)
+    rm.sync_actual_balance(balance_cents=10000, portfolio_value_cents=60000)
+    assert not rm.state.kill_switch_active
+    # Portfolio value spikes up to $660, peak tracks it
+    rm.sync_actual_balance(balance_cents=10000, portfolio_value_cents=66000)
+    assert rm.state.peak_equity_cents == 66000
+    # Now portfolio dips 11% from peak but only 6.7% from session start
+    rm.sync_actual_balance(balance_cents=10000, portfolio_value_cents=58700)
+    # Under OLD peak behavior: 11.1% drawdown from 66000 → kill switch
+    # Under NEW session_start: 2.2% drawdown from 60000 → allowed
+    assert not rm.state.kill_switch_active
+
+
+def test_drawdown_peak_mode_still_works_when_configured():
+    """Opt-in strict mode: CADENCE_DRAWDOWN_REFERENCE=peak."""
+    config = RiskConfig(max_drawdown_pct=10.0, drawdown_reference="peak")
+    rm = RiskManager(config=config, starting_equity_cents=0)
+    rm.sync_actual_balance(balance_cents=10000, portfolio_value_cents=60000)
+    # Push peak to $660
+    rm.sync_actual_balance(balance_cents=10000, portfolio_value_cents=66000)
+    # Dip 11% from the peak
+    rm.sync_actual_balance(balance_cents=10000, portfolio_value_cents=58700)
+    # Peak mode: triggers because 58700 is 11% below 66000
+    assert rm.state.kill_switch_active
+
+
+def test_drawdown_session_start_triggers_only_on_real_losses():
+    """Session_start mode: must be below starting balance, not just peak."""
+    config = RiskConfig(max_drawdown_pct=10.0)  # session_start by default
+    rm = RiskManager(config=config, starting_equity_cents=0)
+    rm.sync_actual_balance(balance_cents=10000, portfolio_value_cents=60000)
+    # Drop 11% below session start ($60 → $53.40)
+    rm.sync_actual_balance(balance_cents=10000, portfolio_value_cents=53400)
+    assert rm.state.kill_switch_active
+    assert "session_start" in rm.state.kill_switch_reason
+
+
 def test_no_drawdown_allows():
     rm = RiskManager(starting_equity_cents=10000)
     rm.state.current_equity_cents = 9500  # 5% drawdown, limit is 10%
@@ -410,6 +456,9 @@ if __name__ == "__main__":
     test_kill_switch_can_be_deactivated()
     test_drawdown_pct_triggers_kill_switch()
     test_drawdown_absolute_triggers_kill_switch()
+    test_drawdown_default_is_session_start_not_peak()
+    test_drawdown_peak_mode_still_works_when_configured()
+    test_drawdown_session_start_triggers_only_on_real_losses()
     test_no_drawdown_allows()
     test_daily_loss_limit_blocks()
     test_per_trade_limit_blocks()
@@ -442,4 +491,4 @@ if __name__ == "__main__":
     test_daily_loss_pct_blocks_when_hit()
     test_daily_loss_both_uses_smaller()
     test_dynamic_limits_in_status()
-    print("All 36 risk manager tests passed!")
+    print("All 39 risk manager tests passed!")

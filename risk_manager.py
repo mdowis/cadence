@@ -33,9 +33,20 @@ class RiskConfig:
     """
     All limits in cents unless noted. Set any to None to disable that check.
     """
-    # -- Kill switch (trailing drawdown from peak equity) --
-    max_drawdown_pct: float = 10.0          # 10% from peak → kill switch
+    # -- Kill switch (drawdown threshold) --
+    max_drawdown_pct: float = 10.0          # 10% drawdown → kill switch
     max_drawdown_cents: int = None          # Absolute drawdown cap (e.g. 5000 = $50)
+
+    # What baseline to measure drawdown against:
+    #   "session_start" (default): daily starting balance. Resets at midnight
+    #     or on manual reset_daily(). Safer for users with existing positions
+    #     on their Kalshi account — natural portfolio fluctuations that bring
+    #     equity below a stale peak won't trip the kill switch.
+    #   "peak": peak equity high-water mark. Strict mode for pure-Cadence
+    #     accounts where all equity changes are caused by Cadence trades.
+    #     Peak grows but never shrinks, so any dip from the all-time high
+    #     triggers — including non-Cadence position moves.
+    drawdown_reference: str = "session_start"
 
     # -- Daily limits --
     # daily_loss_limit_cents: flat cents cap (hardcoded)
@@ -487,8 +498,9 @@ class RiskManager:
         with self._lock:
             equity = self.state.current_equity_cents
             peak = self.state.peak_equity_cents
-            drawdown_cents = peak - equity
-            drawdown_pct = (drawdown_cents / peak * 100) if peak > 0 else 0
+            reference = self._drawdown_reference_cents()
+            drawdown_cents = max(0, reference - equity) if reference > 0 else 0
+            drawdown_pct = (drawdown_cents / reference * 100) if reference > 0 else 0
 
             per_trade_limit = self._effective_per_trade_limit()
             daily_limit = self._effective_daily_loss_limit()
@@ -503,6 +515,9 @@ class RiskManager:
                 "daily_starting_balance_cents": self.state.daily_starting_balance_cents,
                 "drawdown_cents": drawdown_cents,
                 "drawdown_pct": round(drawdown_pct, 2),
+                "drawdown_reference_mode": getattr(
+                    self.config, "drawdown_reference", "session_start"),
+                "drawdown_reference_cents": reference,
                 "daily_pnl_cents": self.state.daily_pnl_cents,
                 "daily_trade_count": self.state.daily_trade_count,
                 "total_exposure_cents": self.state.total_exposure_cents,
@@ -615,22 +630,41 @@ class RiskManager:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _drawdown_reference_cents(self):
+        """
+        Return the equity value to measure drawdown against.
+
+        Respects config.drawdown_reference:
+          - "session_start": today's opening balance (resets on new day
+            or manual reset_daily). Default. Safer when the account has
+            positions not managed by Cadence.
+          - "peak": all-time high water mark. Strict mode.
+        """
+        mode = getattr(self.config, "drawdown_reference", "session_start")
+        if mode == "peak":
+            return self.state.peak_equity_cents
+        # Default: session_start
+        return self.state.daily_starting_balance_cents or \
+               self.state.peak_equity_cents
+
     def _check_drawdown(self):
         """Check if drawdown exceeds limits. Activates kill switch if so."""
         equity = self.state.current_equity_cents
-        peak = self.state.peak_equity_cents
+        reference = self._drawdown_reference_cents()
 
-        if peak <= 0:
+        if reference <= 0:
             return None
 
-        drawdown_cents = peak - equity
-        drawdown_pct = (drawdown_cents / peak) * 100
+        # max(0, ...) so recovery above the reference doesn't report negative
+        drawdown_cents = max(0, reference - equity)
+        drawdown_pct = (drawdown_cents / reference) * 100
+        mode = getattr(self.config, "drawdown_reference", "session_start")
 
         # Percentage drawdown
         if self.config.max_drawdown_pct and drawdown_pct >= self.config.max_drawdown_pct:
             reason = (f"Drawdown {drawdown_pct:.1f}% hit limit "
                       f"{self.config.max_drawdown_pct}% "
-                      f"(peak: {peak}¢, current: {equity}¢)")
+                      f"({mode}: {reference}¢, current: {equity}¢)")
             was_active = self.state.kill_switch_active
             self.state.kill_switch_active = True
             self.state.kill_switch_reason = reason
@@ -644,7 +678,8 @@ class RiskManager:
         # Absolute drawdown
         if self.config.max_drawdown_cents and drawdown_cents >= self.config.max_drawdown_cents:
             reason = (f"Drawdown {drawdown_cents}¢ hit limit "
-                      f"{self.config.max_drawdown_cents}¢")
+                      f"{self.config.max_drawdown_cents}¢ "
+                      f"({mode})")
             was_active = self.state.kill_switch_active
             self.state.kill_switch_active = True
             self.state.kill_switch_reason = reason
