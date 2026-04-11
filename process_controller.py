@@ -164,12 +164,23 @@ class ProcessController:
                     )
                     print(f"  [scanner] {self.scanner_status.last_detail}", flush=True)
 
-                # Sync balance from Kalshi (source of truth)
+                # Sync balance from Kalshi (source of truth for equity).
+                # portfolio_value = cash + mark-to-market position value,
+                # which is the REAL total account equity.
                 try:
                     balance_resp = self.trader.get_balance()
-                    balance = balance_resp.get("balance", 0)
-                    if balance:
-                        self.risk_mgr.sync_actual_balance(balance)
+                    balance = balance_resp.get("balance") or 0
+                    portfolio_value = balance_resp.get("portfolio_value") or 0
+                    if balance or portfolio_value:
+                        self.risk_mgr.sync_actual_balance(
+                            balance_cents=balance,
+                            portfolio_value_cents=portfolio_value,
+                        )
+                        print(
+                            f"  [scanner] balance sync: cash=${balance/100:.2f} "
+                            f"portfolio=${portfolio_value/100:.2f}",
+                            flush=True,
+                        )
                 except Exception as e:
                     # Balance sync is non-fatal — don't kill the scanner
                     print(f"  [scanner] Balance sync failed: {e}", flush=True)

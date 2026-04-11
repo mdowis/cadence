@@ -568,10 +568,17 @@ Then open http://localhost:8050
     if authenticated and env_bool("CADENCE_SYNC_BALANCE", True):
         try:
             balance_resp = _trader.get_balance()
-            balance = balance_resp.get("balance", 0)
-            if balance:
-                _risk_mgr.sync_actual_balance(balance)
-                print(f"  Synced Kalshi balance: {balance}c (${balance/100:.2f})")
+            balance = balance_resp.get("balance") or 0
+            portfolio_value = balance_resp.get("portfolio_value") or 0
+            if balance or portfolio_value:
+                _risk_mgr.sync_actual_balance(
+                    balance_cents=balance,
+                    portfolio_value_cents=portfolio_value,
+                )
+                print(f"  Synced Kalshi balance:")
+                print(f"    Cash:            ${balance/100:.2f}")
+                print(f"    Portfolio value: ${portfolio_value/100:.2f}")
+                print(f"    (equity = portfolio_value)")
         except Exception as e:
             print(f"  WARNING: Could not sync balance: {e}")
 

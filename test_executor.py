@@ -182,7 +182,9 @@ class FakeTrader:
         return self.positions_response
 
     def get_balance(self):
-        return {"balance": 10000}
+        # balance=cash, portfolio_value=total equity.
+        # Default: $1000 cash, $1000 portfolio (matches default test RM equity).
+        return {"balance": 100000, "portfolio_value": 100000}
 
     def get_orderbook(self, ticker):
         return self.orderbook_response

@@ -200,24 +200,53 @@ def test_status_report():
 
 # --- Balance Sync ---
 
-def test_balance_sync_initializes_equity():
-    """First balance sync sets starting equity when none was set."""
+def test_balance_sync_initializes_equity_with_portfolio_value():
+    """First sync uses portfolio_value as authoritative equity."""
     rm = RiskManager(starting_equity_cents=0)
-    rm.sync_actual_balance(7500)
-    assert rm.state.current_equity_cents == 7500
+    rm.sync_actual_balance(balance_cents=3000, portfolio_value_cents=7500)
+    assert rm.state.current_equity_cents == 7500  # portfolio_value wins
     assert rm.state.starting_equity_cents == 7500
     assert rm.state.peak_equity_cents == 7500
-    assert rm.state.last_synced_balance_cents == 7500
-    assert rm.state.balance_sync_count == 1
+    # Derived exposure = portfolio - balance = 4500
+    assert rm.state.total_exposure_cents == 4500
+
+
+def test_balance_sync_falls_back_to_balance_if_no_portfolio_value():
+    """If portfolio_value is missing/zero, fall back to cash balance."""
+    rm = RiskManager(starting_equity_cents=0)
+    rm.sync_actual_balance(7500)  # no portfolio_value
+    assert rm.state.current_equity_cents == 7500
+    # No portfolio_value means no derived exposure
+    assert rm.state.total_exposure_cents == 0
+
+
+def test_balance_sync_never_double_counts():
+    """
+    Regression for the user-reported bug: with the old code we'd compute
+    equity = balance + internally_tracked_exposure, which could
+    double-count or mis-count relative to Kalshi's actual account.
+    """
+    rm = RiskManager(starting_equity_cents=0)
+    # Set internal tracking to a stale value
+    rm.state.total_exposure_cents = 9999
+    # New sync with portfolio_value: should IGNORE internal tracking
+    rm.sync_actual_balance(balance_cents=2000, portfolio_value_cents=5000)
+    assert rm.state.current_equity_cents == 5000  # not 5000 + 9999
+    # And internal tracking should be replaced with the real derived value
+    assert rm.state.total_exposure_cents == 3000  # 5000 - 2000
 
 
 def test_balance_sync_updates_peak():
     rm = RiskManager(starting_equity_cents=5000)
     rm.state.peak_equity_cents = 5000
     rm.state.current_equity_cents = 5000
-    rm.sync_actual_balance(6000)  # balance up to 6000
+    rm.sync_actual_balance(
+        balance_cents=6000, portfolio_value_cents=6000,
+    )
     assert rm.state.peak_equity_cents == 6000
-    rm.sync_actual_balance(5500)  # balance down
+    rm.sync_actual_balance(
+        balance_cents=5500, portfolio_value_cents=5500,
+    )
     assert rm.state.peak_equity_cents == 6000  # peak preserved
 
 
@@ -225,25 +254,31 @@ def test_balance_sync_triggers_drawdown_kill():
     config = RiskConfig(max_drawdown_pct=10.0)
     rm = RiskManager(config=config, starting_equity_cents=10000)
     rm.state.peak_equity_cents = 10000
-    rm.sync_actual_balance(8900)  # 11% drawdown
+    rm.sync_actual_balance(
+        balance_cents=8900, portfolio_value_cents=8900,
+    )
     assert rm.state.kill_switch_active
 
 
-def test_balance_sync_adds_exposure():
-    """Equity = cash + open position cost basis."""
-    rm = RiskManager(starting_equity_cents=10000)
-    rm.state.total_exposure_cents = 500  # $5 in open positions
-    rm.sync_actual_balance(9500)  # $95 cash
-    # Total equity = 9500 + 500 = 10000
-    assert rm.state.current_equity_cents == 10000
-
-
-def test_balance_sync_computes_daily_pnl():
+def test_balance_sync_computes_daily_pnl_from_portfolio():
     rm = RiskManager(starting_equity_cents=10000)
     rm.state.daily_starting_balance_cents = 10000
     rm.state.daily_date = time.strftime("%Y-%m-%d")
-    rm.sync_actual_balance(10300)
+    rm.sync_actual_balance(
+        balance_cents=5000, portfolio_value_cents=10300,
+    )
     assert rm.state.daily_pnl_cents == 300
+
+
+def test_reset_daily_rebaselines_peak():
+    """reset_daily should bring peak back to current equity."""
+    rm = RiskManager(starting_equity_cents=10000)
+    rm.state.peak_equity_cents = 15000  # stale high from before
+    rm.state.current_equity_cents = 10800
+    rm.reset_daily()
+    assert rm.state.peak_equity_cents == 10800
+    assert rm.state.daily_starting_balance_cents == 10800
+    assert rm.state.daily_pnl_cents == 0
 
 
 # --- Dynamic per-trade limit (% of equity) ---
@@ -389,11 +424,13 @@ if __name__ == "__main__":
     test_min_profit_blocks()
     test_min_roi_blocks()
     test_status_report()
-    test_balance_sync_initializes_equity()
+    test_balance_sync_initializes_equity_with_portfolio_value()
+    test_balance_sync_falls_back_to_balance_if_no_portfolio_value()
+    test_balance_sync_never_double_counts()
     test_balance_sync_updates_peak()
     test_balance_sync_triggers_drawdown_kill()
-    test_balance_sync_adds_exposure()
-    test_balance_sync_computes_daily_pnl()
+    test_balance_sync_computes_daily_pnl_from_portfolio()
+    test_reset_daily_rebaselines_peak()
     test_per_trade_pct_only()
     test_per_trade_pct_scales_with_equity()
     test_per_trade_pct_shrinks_with_equity()
@@ -405,4 +442,4 @@ if __name__ == "__main__":
     test_daily_loss_pct_blocks_when_hit()
     test_daily_loss_both_uses_smaller()
     test_dynamic_limits_in_status()
-    print("All 34 risk manager tests passed!")
+    print("All 36 risk manager tests passed!")

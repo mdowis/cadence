@@ -357,13 +357,24 @@ class RiskManager:
     # Balance sync (from Kalshi /portfolio/balance)
     # ------------------------------------------------------------------
 
-    def sync_actual_balance(self, balance_cents):
+    def sync_actual_balance(self, balance_cents, portfolio_value_cents=None):
         """
-        Sync current equity from the exchange (source of truth for cash).
+        Sync current equity from the exchange (source of truth).
 
-        Call this periodically with Kalshi's cash balance. Total equity is
-        cash + cost basis of open positions, because open positions are
-        deferred P&L until they resolve.
+        Kalshi's /portfolio/balance returns:
+          - balance: available cash only (cents)
+          - portfolio_value: total equity = cash + mark-to-market position value
+
+        If portfolio_value_cents is provided, we use it directly as the equity.
+        That's Kalshi's actual total account value and the correct number to
+        display and use for drawdown / P&L.
+
+        If portfolio_value is not provided (legacy or old API), fall back to
+        just the cash balance (undercount but safer than double-counting).
+
+        Also derives real open-position exposure as (portfolio_value - balance)
+        and uses that for the exposure cap instead of the internally tracked
+        cost basis (which can drift from reality).
 
         On first call, initializes starting and peak equity.
         On subsequent calls, reconciles daily P&L and checks drawdown.
@@ -371,10 +382,17 @@ class RiskManager:
         with self._lock:
             self._maybe_reset_daily_internal()
 
-            # Total equity = cash balance + value locked in open positions
-            total_equity = balance_cents + int(self.state.total_exposure_cents)
+            if portfolio_value_cents is not None and portfolio_value_cents > 0:
+                total_equity = int(portfolio_value_cents)
+                # Derive the real position value directly from Kalshi's numbers
+                real_exposure = max(0, total_equity - int(balance_cents))
+                self.state.total_exposure_cents = real_exposure
+            else:
+                # Fallback: no portfolio_value, just use cash. Undercounts
+                # equity if there are open positions but doesn't double-count.
+                total_equity = int(balance_cents)
 
-            # First-time initialization: treat current balance as baseline
+            # First-time initialization: treat current total as baseline
             if self.state.starting_equity_cents == 0:
                 self.state.starting_equity_cents = total_equity
                 self.state.peak_equity_cents = total_equity
@@ -382,7 +400,9 @@ class RiskManager:
                 self.state.current_equity_cents = total_equity
                 self._log_risk_event(
                     "balance_initialized",
-                    f"Starting equity set from Kalshi balance: {total_equity}c"
+                    f"Starting equity set from Kalshi: {total_equity}c "
+                    f"(cash={balance_cents}c, "
+                    f"portfolio_value={portfolio_value_cents}c)"
                 )
             else:
                 self.state.current_equity_cents = total_equity
@@ -426,12 +446,28 @@ class RiskManager:
             self._persist()
 
     def reset_daily(self):
-        """Manually reset daily counters."""
+        """
+        Manually reset daily counters AND re-baseline to the current equity.
+
+        Use this after a bug fix or config change that makes the old
+        baseline stale (e.g., equity is now computed differently).
+        """
         with self._lock:
             self.state.daily_pnl_cents = 0.0
             self.state.daily_trade_count = 0
             self.state.daily_date = time.strftime("%Y-%m-%d")
-            self._log_risk_event("daily_reset", "Manual reset")
+            # Re-baseline: today's starting balance and peak now match
+            # whatever the current equity actually is. This clears stale
+            # peaks from before the last equity recalculation bug fix.
+            current = self.state.current_equity_cents
+            self.state.daily_starting_balance_cents = current
+            self.state.peak_equity_cents = current
+            if self.state.starting_equity_cents == 0:
+                self.state.starting_equity_cents = current
+            self._log_risk_event(
+                "daily_reset",
+                f"Baseline reset to ${current/100:.2f}"
+            )
             self._persist()
 
     # ------------------------------------------------------------------

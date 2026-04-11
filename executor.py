@@ -371,29 +371,23 @@ def _unwind_filled_legs(trader, orders, result, risk_mgr):
     return unwound, errors
 
 
-def _get_real_exposure_cents(trader):
+def _sync_balance_before_trade(trader, risk_mgr):
     """
-    Reconcile exposure from Kalshi's actual portfolio positions.
-
-    Returns the sum of cost basis for all open positions in cents,
-    or None if the call fails.
+    Pull fresh balance from Kalshi and sync it into the risk manager so
+    the risk check uses the real-time total equity, not a stale snapshot.
+    Silent on failure — the periodic scanner sync is the safety net.
     """
     try:
-        resp = trader.get_positions()
-        positions = resp.get("market_positions") or resp.get("positions") or []
-        total = 0
-        for p in positions:
-            # Try several possible cost-basis fields
-            for field in ("total_traded", "cost_basis_cents", "position",
-                          "realized_pnl_cents"):
-                val = p.get(field)
-                if isinstance(val, (int, float)) and val > 0:
-                    total += abs(int(val))
-                    break
-        return total
+        resp = trader.get_balance()
+        balance = resp.get("balance") or 0
+        portfolio_value = resp.get("portfolio_value") or 0
+        if balance or portfolio_value:
+            risk_mgr.sync_actual_balance(
+                balance_cents=balance,
+                portfolio_value_cents=portfolio_value,
+            )
     except Exception as e:
-        print(f"    [exposure sync] failed: {e}", flush=True)
-        return None
+        print(f"    [pre-trade balance sync] failed: {e}", flush=True)
 
 
 def execute_opportunity(trader, risk_mgr, opp, contracts=1, dry_run=False,
@@ -416,13 +410,12 @@ def execute_opportunity(trader, risk_mgr, opp, contracts=1, dry_run=False,
     if is_multi_leg and not allow_multi_leg:
         return False, "multi-leg arbs disabled (set CADENCE_ALLOW_MULTI_LEG=true to enable)"
 
-    # 2. Reconcile real exposure from Kalshi before any risk checks.
-    # This catches cases where our internal tracking drifted from the
-    # real account state (e.g. unwound positions, manual trades).
+    # 2. Sync real equity and exposure from Kalshi before any risk checks.
+    # sync_actual_balance uses portfolio_value (Kalshi's authoritative
+    # total equity) as the source of truth and derives exposure as
+    # portfolio_value - balance.
     if not dry_run:
-        real_exposure = _get_real_exposure_cents(trader)
-        if real_exposure is not None:
-            risk_mgr.state.total_exposure_cents = real_exposure
+        _sync_balance_before_trade(trader, risk_mgr)
 
     # 3. Risk check
     decision = risk_mgr.check_trade(opp, contracts)
